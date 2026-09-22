@@ -10,8 +10,64 @@ import { connect, sendEnvelope, parseEnvelope } from "./ws-client.js";
 import { renderQR } from "./qr-encode.js";
 import { startScanning } from "./qr-scan.js";
 import * as b64url from "./base64url.js";
+import * as pake from "./pake.js";
 
 const SESSION_KEY_BYTES = 32;
+
+function toHex(bytes) {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function fromHex(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return bytes;
+}
+
+/** Waits for the next message of a given type on socket. Safe to have
+ * several of these (and other listeners) on the same socket at once —
+ * each just ignores message types it isn't waiting for. */
+function waitForType(socket, type) {
+  return new Promise((resolve) => {
+    function onMessage(event) {
+      const env = parseEnvelope(event);
+      if (env && env.type === type) {
+        socket.removeEventListener("message", onMessage);
+        resolve(env);
+      }
+    }
+    socket.addEventListener("message", onMessage);
+  });
+}
+
+/** Runs the code+PAKE key exchange over an already-paired socket and
+ * returns the confirmed shared sessionKey, or throws if the other side
+ * didn't derive the same key (wrong code). pakeRole 0 = host
+ * (initiator), 1 = guest (responder) — see docs/PROTOCOL.md. */
+async function runPakeExchange(socket, code, pakeRole) {
+  const initResult = await pake.init(code, pakeRole);
+  const handle = initResult.handle;
+
+  if (pakeRole === 0) {
+    sendEnvelope(socket, "pake_msg", { message: initResult.message });
+  }
+  const peerMsgEnv = await waitForType(socket, "pake_msg");
+  const updateResult = await pake.update(handle, peerMsgEnv.payload.message);
+  if (pakeRole === 1) {
+    sendEnvelope(socket, "pake_msg", { message: updateResult.message });
+  }
+
+  const keyBytes = await pake.sessionKey(handle);
+  const myTag = await pake.computeConfirmTag(keyBytes);
+  sendEnvelope(socket, "pake_confirm", { tagHex: toHex(myTag) });
+  const confirmEnv = await waitForType(socket, "pake_confirm");
+  const peerTag = fromHex(confirmEnv.payload.tagHex);
+  const ok = await pake.verifyConfirmTag(keyBytes, peerTag);
+
+  await pake.free(handle);
+  if (!ok) throw new Error("code_mismatch");
+  return keyBytes;
+}
 
 let currentState = { screen: "role-select" };
 let activeSocket = null;
@@ -114,6 +170,12 @@ function render(container) {
     case "join-detected":
       renderJoinDetected(container);
       break;
+    case "receive-method-select":
+      renderReceiveMethodSelect(container);
+      break;
+    case "send-method-select":
+      renderSendMethodSelect(container);
+      break;
     case "receiver-generating":
       renderStatus(container, t("receiverGenerating"));
       break;
@@ -131,6 +193,18 @@ function render(container) {
       break;
     case "joining":
       renderStatus(container, t("statusJoining"));
+      break;
+    case "code-receiver-generating":
+      renderStatus(container, t("receiverGenerating"));
+      break;
+    case "code-receiver-waiting":
+      renderCodeReceiverWaiting(container);
+      break;
+    case "code-sender-entry":
+      renderCodeSenderEntry(container);
+      break;
+    case "verifying":
+      renderStatus(container, t("statusVerifying"));
       break;
     case "paired":
       renderPaired(container);
@@ -168,12 +242,34 @@ function renderRoleSelect(container) {
   const row = document.createElement("div");
   row.className = "role-row";
   row.appendChild(
-    button(t("roleReceive"), () => startReceiverFlow(container), suggested === "receive" ? "primary-button" : ""),
+    button(
+      t("roleReceive"),
+      () => advance(container, { screen: "receive-method-select" }),
+      suggested === "receive" ? "primary-button" : "",
+    ),
   );
   row.appendChild(
-    button(t("roleSend"), () => advance(container, { screen: "sender-select" }), suggested === "send" ? "primary-button" : ""),
+    button(
+      t("roleSend"),
+      () => advance(container, { screen: "send-method-select" }),
+      suggested === "send" ? "primary-button" : "",
+    ),
   );
   container.appendChild(row);
+}
+
+function renderReceiveMethodSelect(container) {
+  container.appendChild(paragraph(t("methodChooseTitle")));
+  container.appendChild(button(t("methodQR"), () => startReceiverFlow(container), "primary-button"));
+  container.appendChild(button(t("methodCode"), () => startReceiverCodeFlow(container)));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "role-select" })));
+}
+
+function renderSendMethodSelect(container) {
+  container.appendChild(paragraph(t("methodChooseTitle")));
+  container.appendChild(button(t("methodQR"), () => advance(container, { screen: "sender-select" }), "primary-button"));
+  container.appendChild(button(t("methodCode"), () => advance(container, { screen: "code-sender-entry" })));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "role-select" })));
 }
 
 function renderJoinDetected(container) {
@@ -223,6 +319,122 @@ function startReceiverFlow(container) {
   });
 }
 
+function startReceiverCodeFlow(container) {
+  advance(container, { screen: "code-receiver-generating" });
+
+  const socket = connect();
+  activeSocket = socket;
+
+  socket.addEventListener("open", () => sendEnvelope(socket, "create_code_session", null));
+
+  socket.addEventListener("message", (event) => {
+    const env = parseEnvelope(event);
+    if (!env) return;
+
+    if (env.type === "code_session_created") {
+      advance(container, {
+        screen: "code-receiver-waiting",
+        code: env.payload.code,
+        expiresAt: env.payload.expiresAt,
+      });
+    } else if (env.type === "paired") {
+      const code = currentState.code;
+      advance(container, { screen: "verifying" });
+      runPakeExchange(socket, code, 0)
+        .then((sessionKey) => {
+          advance(container, { screen: "paired", role: "host", sessionKey });
+        })
+        .catch(() => {
+          setState(container, { screen: "error", code: "code_mismatch" });
+        });
+    } else if (env.type === "error") {
+      setState(container, { screen: "error", code: env.payload && env.payload.code });
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    if (currentState.screen !== "paired" && currentState.screen !== "error") {
+      setState(container, { screen: "error", code: "connection_lost" });
+    }
+  });
+}
+
+function renderCodeReceiverWaiting(container) {
+  container.appendChild(paragraph(t("codeReceiverWaiting")));
+
+  const formatted = currentState.code.slice(0, 3) + "-" + currentState.code.slice(3);
+  container.appendChild(paragraph(formatted, "pairing-code"));
+
+  container.appendChild(paragraph(t("codeExpiryNote"), "muted"));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "receive-method-select" })));
+}
+
+function renderCodeSenderEntry(container) {
+  container.appendChild(paragraph(t("codeSenderLabel")));
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.inputMode = "numeric";
+  input.autocomplete = "off";
+  input.maxLength = 7; // 6 digits + 1 dash
+  input.className = "code-input";
+  input.placeholder = "000-000";
+  input.addEventListener("input", () => {
+    const digits = input.value.replace(/\D/g, "").slice(0, 6);
+    input.value = digits.length > 3 ? `${digits.slice(0, 3)}-${digits.slice(3)}` : digits;
+  });
+  container.appendChild(input);
+
+  container.appendChild(
+    button(
+      t("senderPasteButton"),
+      () => {
+        const digits = input.value.replace(/\D/g, "");
+        if (digits.length !== 6) {
+          setState(container, { screen: "error", code: "invalid_code" });
+          return;
+        }
+        startJoinByCode(container, digits);
+      },
+      "primary-button",
+    ),
+  );
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "send-method-select" })));
+}
+
+function startJoinByCode(container, code) {
+  advance(container, { screen: "joining" });
+
+  const socket = connect();
+  activeSocket = socket;
+
+  socket.addEventListener("open", () => sendEnvelope(socket, "join_by_code", { code }));
+
+  socket.addEventListener("message", (event) => {
+    const env = parseEnvelope(event);
+    if (!env) return;
+
+    if (env.type === "paired") {
+      advance(container, { screen: "verifying" });
+      runPakeExchange(socket, code, 1)
+        .then((sessionKey) => {
+          advance(container, { screen: "paired", role: "guest", sessionKey });
+        })
+        .catch(() => {
+          setState(container, { screen: "error", code: "code_mismatch" });
+        });
+    } else if (env.type === "error") {
+      setState(container, { screen: "error", code: env.payload && env.payload.code });
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    if (currentState.screen !== "paired" && currentState.screen !== "error") {
+      setState(container, { screen: "error", code: "connection_lost" });
+    }
+  });
+}
+
 function renderReceiverWaiting(container) {
   container.appendChild(paragraph(t("receiverWaiting")));
 
@@ -234,14 +446,14 @@ function renderReceiverWaiting(container) {
   container.appendChild(paragraph(t("receiverLinkLabel"), "muted"));
   container.appendChild(paragraph(currentState.url, "pairing-link"));
 
-  container.appendChild(button(t("backButton"), () => setState(container, { screen: "role-select" })));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "receive-method-select" })));
 }
 
 function renderSenderSelect(container) {
   container.appendChild(paragraph(t("senderChooseTitle")));
   container.appendChild(button(t("senderScan"), () => advance(container, { screen: "sender-scanning" }), "primary-button"));
   container.appendChild(button(t("senderPaste"), () => advance(container, { screen: "sender-paste" })));
-  container.appendChild(button(t("backButton"), () => setState(container, { screen: "role-select" })));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "send-method-select" })));
 }
 
 function renderSenderScanning(container) {
@@ -348,6 +560,9 @@ const ERROR_MESSAGE_KEYS = {
   invalid_qr: "senderPasteInvalid",
   invalid_link: "senderPasteInvalid",
   camera_error: "senderCameraError",
+  invalid_code: "errInvalidCode",
+  too_many_attempts: "errTooManyAttempts",
+  code_mismatch: "errCodeMismatch",
 };
 
 function renderError(container) {

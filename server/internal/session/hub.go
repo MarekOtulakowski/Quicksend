@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"sync"
 	"time"
 
@@ -25,7 +26,29 @@ var (
 	// ErrSessionFull means the session's guest slot is already occupied
 	// by a connected peer.
 	ErrSessionFull = errors.New("session already has two peers")
+	// ErrInvalidCode means the pairing code doesn't match any active
+	// code session (wrong code, already used, or expired).
+	ErrInvalidCode = errors.New("invalid or expired pairing code")
+	// ErrTooManyAttempts means ip has made too many wrong join_by_code
+	// guesses recently and is temporarily blocked from trying more.
+	ErrTooManyAttempts = errors.New("too many wrong pairing code attempts")
 )
+
+// codeEntry maps a short human-readable pairing code to the session
+// it was generated for. Removed on first successful lookup (single
+// use) or once expired.
+type codeEntry struct {
+	sessionID string
+	expiresAt time.Time
+}
+
+// guessBudget tracks wrong join_by_code guesses from one IP within a
+// rolling window, so brute-forcing the code space is rate-limited
+// independently of any specific target session.
+type guessBudget struct {
+	count       int
+	windowStart time.Time
+}
 
 // Hub owns every live session and enforces the relay's resource limits
 // (concurrent sessions per IP, session inactivity, reconnect grace
@@ -40,6 +63,8 @@ type Hub struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	ipCounts map[string]int
+	codes    map[string]*codeEntry
+	guesses  map[string]*guessBudget
 }
 
 // NewHub builds a Hub enforcing the given config's limits.
@@ -49,6 +74,8 @@ func NewHub(cfg config.Config) *Hub {
 		now:      time.Now,
 		sessions: make(map[string]*Session),
 		ipCounts: make(map[string]int),
+		codes:    make(map[string]*codeEntry),
+		guesses:  make(map[string]*guessBudget),
 	}
 }
 
@@ -92,6 +119,83 @@ func (h *Hub) JoinSession(ctx context.Context, id, ip string, conn Conn) (*Sessi
 	}
 	h.mu.Unlock()
 
+	return h.attachGuest(ctx, s, ip, conn)
+}
+
+// CreateCodeSession starts a new session exactly like CreateSession,
+// but instead of exposing the sessionId directly (for a QR/link), it
+// generates a short one-time human-readable code and sends that. The
+// code is both the routing key a remote peer uses to find this
+// session (join_by_code) and, client-side, the PAKE password — the
+// relay treats it as an opaque lookup key and never learns anything
+// about the PAKE exchange itself.
+func (h *Hub) CreateCodeSession(ctx context.Context, ip string, conn Conn) (*Session, Role, error) {
+	h.mu.Lock()
+	if h.ipCounts[ip] >= h.cfg.MaxSessionsPerIP {
+		h.mu.Unlock()
+		return nil, 0, ErrTooManySessions
+	}
+	id, err := newSessionID()
+	if err != nil {
+		h.mu.Unlock()
+		return nil, 0, fmt.Errorf("generate session id: %w", err)
+	}
+	code, err := h.newUniqueCodeLocked()
+	if err != nil {
+		h.mu.Unlock()
+		return nil, 0, fmt.Errorf("generate pairing code: %w", err)
+	}
+	now := h.now()
+	expiresAt := now.Add(h.cfg.PairingCodeTTL)
+	s := newSession(id, now)
+	s.attach(RoleHost, conn, ip, now)
+	h.sessions[id] = s
+	h.codes[code] = &codeEntry{sessionID: id, expiresAt: expiresAt}
+	h.ipCounts[ip]++
+	h.mu.Unlock()
+
+	sendEnvelope(ctx, conn, proto.TypeCodeSessionCreated, proto.CodeSessionCreatedPayload{Code: code, ExpiresAt: expiresAt})
+	return s, RoleHost, nil
+}
+
+// JoinByCode looks up code (rate-limited per ip to defend against
+// online brute-force guessing) and, if it matches a live, unexpired
+// code session, attaches ip's connection as its guest — otherwise
+// identical to JoinSession. The code is consumed (single-use) as soon
+// as it's successfully matched, regardless of what happens afterward.
+func (h *Hub) JoinByCode(ctx context.Context, code, ip string, conn Conn) (*Session, Role, error) {
+	now := h.now()
+
+	h.mu.Lock()
+	if !h.checkAndRecordGuessLocked(ip, now) {
+		h.mu.Unlock()
+		return nil, 0, ErrTooManyAttempts
+	}
+
+	entry, ok := h.codes[code]
+	if !ok || now.After(entry.expiresAt) {
+		delete(h.codes, code) // clean up if merely expired
+		h.mu.Unlock()
+		return nil, 0, ErrInvalidCode
+	}
+	delete(h.codes, code) // single-use: consumed by this match attempt
+
+	if h.ipCounts[ip] >= h.cfg.MaxSessionsPerIP {
+		h.mu.Unlock()
+		return nil, 0, ErrTooManySessions
+	}
+	s, ok := h.sessions[entry.sessionID]
+	h.mu.Unlock()
+	if !ok {
+		return nil, 0, ErrSessionNotFound
+	}
+
+	return h.attachGuest(ctx, s, ip, conn)
+}
+
+// attachGuest is the shared "attach as guest, notify both sides"
+// logic behind both JoinSession and JoinByCode.
+func (h *Hub) attachGuest(ctx context.Context, s *Session, ip string, conn Conn) (*Session, Role, error) {
 	hostConn := s.connOf(RoleHost)
 	if hostConn == nil {
 		// The host that created this session is no longer connected
@@ -112,6 +216,41 @@ func (h *Hub) JoinSession(ctx context.Context, id, ip string, conn Conn) (*Sessi
 	sendEnvelope(ctx, hostConn, proto.TypePaired, nil)
 	sendEnvelope(ctx, conn, proto.TypePaired, nil)
 	return s, RoleGuest, nil
+}
+
+// newUniqueCodeLocked generates a 6-digit code not currently in use.
+// Callers must hold h.mu.
+func (h *Hub) newUniqueCodeLocked() (string, error) {
+	for attempt := 0; attempt < 20; attempt++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+		if err != nil {
+			return "", err
+		}
+		code := fmt.Sprintf("%06d", n.Int64())
+		if _, taken := h.codes[code]; !taken {
+			return code, nil
+		}
+	}
+	return "", errors.New("could not find an unused pairing code")
+}
+
+// checkAndRecordGuessLocked reports whether ip is still under its
+// wrong-guess budget for the current window, recording this attempt
+// regardless of whether the code it's about to be checked against
+// turns out to be valid. The window length matches the pairing code
+// TTL: after it elapses, the budget resets rather than accumulating
+// forever. Callers must hold h.mu.
+func (h *Hub) checkAndRecordGuessLocked(ip string, now time.Time) bool {
+	b, ok := h.guesses[ip]
+	if !ok || now.Sub(b.windowStart) >= h.cfg.PairingCodeTTL {
+		b = &guessBudget{windowStart: now}
+		h.guesses[ip] = b
+	}
+	if b.count >= h.cfg.MaxPairingAttempts {
+		return false
+	}
+	b.count++
+	return true
 }
 
 // Relay forwards data from role's peer to the other peer in the same
@@ -175,8 +314,9 @@ func (h *Hub) Run(ctx context.Context, interval time.Duration) {
 
 // ReapOnce scans every session and closes the ones that have been idle
 // too long, or whose disconnected peer never reconnected within the
-// grace period. Exported so tests can drive it deterministically;
-// production code should call Run instead.
+// grace period. It also expires unused pairing codes and stale
+// per-IP guess-attempt tracking. Exported so tests can drive it
+// deterministically; production code should call Run instead.
 func (h *Hub) ReapOnce() {
 	now := h.now()
 
@@ -184,6 +324,16 @@ func (h *Hub) ReapOnce() {
 	ids := make([]string, 0, len(h.sessions))
 	for id := range h.sessions {
 		ids = append(ids, id)
+	}
+	for code, entry := range h.codes {
+		if now.After(entry.expiresAt) {
+			delete(h.codes, code)
+		}
+	}
+	for ip, b := range h.guesses {
+		if now.Sub(b.windowStart) >= h.cfg.PairingCodeTTL {
+			delete(h.guesses, ip)
+		}
 	}
 	h.mu.Unlock()
 

@@ -218,3 +218,112 @@ step (or indefinitely, if the user never acts) is an easy-to-avoid
 exposure — a shoulder-surf, a screen share, or the browser's own
 history/autocomplete UI could all leak it for no benefit, since the
 key is already safely captured in memory by that point.
+
+## Code+PAKE: library, curve, and the WASM size tradeoff
+
+**What:** `github.com/schollz/pake/v3` (SPAKE2), curve **P-256**,
+compiled to WASM (`wasm/pake`) and loaded by `web/pake.js` — the same
+Go package, not a parallel JS SPAKE2 implementation.
+
+**Why:** this is the one place in the project where hand-rolling or
+improvising was explicitly off the table from the start. schollz/pake
+is the PAKE library behind `croc`, a widely-used file-transfer tool
+solving the same problem (short code, relay, no direct connection),
+which is real-world exposure rather than a from-scratch design. Before
+committing to it, I ran an actual spike rather than trusting the docs:
+
+- Confirmed empirically (not just by reading the source) that its
+  wire messages (`Bytes()`) never leak the password or the private
+  ephemeral scalar — both are stripped by a `Public()` copy before
+  marshaling, even though the struct's Go field names are technically
+  exported.
+- Confirmed a correct shared password yields matching session keys on
+  both sides, and a wrong one yields *different* keys without any
+  protocol-level error — which is why key confirmation (below) exists
+  at all.
+- Curve: the library also offers its own "siec" curve, p384/p521, and
+  an Edwards25519 adaptation. P-256 was chosen — and confirmed to work
+  correctly in this library — for being the standard NIST curve with
+  the widest independent scrutiny and implementation, over the
+  library's own bespoke curve.
+- WASM size: compiling this package for `GOOS=js GOARCH=wasm` produces
+  a **~4.5MB binary (~1–1.3MB gzip/brotli-compressed)** — the Go
+  runtime, not the PAKE logic itself, dominates that size. This is far
+  more than a rough "few hundred KB" estimate made when the WASM
+  approach was first proposed; the real number was confirmed by
+  actually building it before proceeding, and reviewed explicitly
+  before writing the rest of this feature. Decision: keep WASM anyway
+  (one PAKE implementation is worth a one-time, service-worker-cached
+  ~1MB download for a file-transfer tool), rather than switching to a
+  separate vetted JS SPAKE2 library, or trying TinyGo (which has real,
+  unverified gaps in `crypto/elliptic` support — not worth the risk
+  for this specific code path).
+
+**Rejected:** a separate JS SPAKE2 implementation (would reintroduce
+the "two independent implementations" problem PAKE specifically was
+called out as too risky for); TinyGo (unverified crypto stdlib
+support); the library's non-standard "siec" curve as the default.
+
+## PAKE key confirmation is homemade, on top of the library
+
+**What:** After the SPAKE2 exchange, both sides independently compute
+`HMAC-SHA256(sessionKey, "quicksend-pake-confirm")` and exchange it as
+a `pake_confirm` message (relayed opaquely, like `pake_msg`). Each
+side compares the *received* tag against its own computed value.
+Mismatch means the two sides used different codes.
+
+**Why:** confirmed empirically during the schollz/pake spike above —
+the library has no built-in way to detect a wrong password; both
+sides just complete the protocol and silently end up with different
+keys. Without an explicit confirmation step, a mistyped code would
+only surface much later as a failed decryption on the first real file
+chunk, exactly the "sometimes doesn't connect" failure mode this
+project is trying to avoid. A plain HMAC over the derived key with a
+fixed context string is enough: it doesn't need to be a challenge or
+carry any per-side asymmetry, because its only job is proving both
+sides landed on the same key, not authenticating a specific party.
+
+## Pairing code doubles as both the routing key and the PAKE password
+
+**What:** The relay looks up `join_by_code`'s code to find the
+matching session (the routing/matchmaking role), and the client uses
+the *same* code as the SPAKE2 password. There's no separate secret.
+
+**Why:** a 6-digit code communicated by voice/SMS is the only shared
+secret the two humans have for this flow — there's nothing else to
+split the routing key and the password from. This means a correct
+guess is automatically a full compromise (finding the session *is*
+knowing the password), which shapes the attempt-limiting design below:
+protection has to happen at the *guessing* layer, not by trying to
+keep the routing lookup and the password conceptually separate.
+
+## Pairing-code brute-force protection: per-IP guess budget, not per-session
+
+**What:** `join_by_code` tracks wrong guesses **per IP address** in a
+rolling window matching the code's TTL (5 minutes): after
+`QUICKSEND_MAX_PAIRING_ATTEMPTS` (default 5) wrong guesses, that IP is
+rejected with `too_many_attempts` until the window rolls over. A code
+itself is consumed (deleted from the registry) the moment any
+`join_by_code` call matches it, whether or not the PAKE confirmation
+that follows actually succeeds — so it's single-use regardless.
+
+**Why:** the intro brief specified "5 wrong attempts per session, then
+the session is invalidated," which is ambiguous once the code is both
+the routing key and the password (previous entry): a wrong guess
+usually doesn't match *any* session, so there's no specific target to
+attribute the attempt to. Tracking the budget per guessing IP instead
+directly targets the actual threat — a client scanning through the
+~1,000,000-code space looking for *any* live session — regardless of
+which (if any) session a given guess happened to almost hit. Combined
+with the code's own short TTL and the existing per-IP concurrent
+session limit, this keeps brute-forcing the whole code space
+infeasible within any single code's lifetime. This was discussed and
+confirmed explicitly before implementation, given the ambiguity.
+
+## `clientIP` trust (see the earlier X-Forwarded-For entry) now also gates pairing-code brute-force protection
+
+The per-IP guess budget above inherits the same trust assumption as
+`QUICKSEND_MAX_SESSIONS_PER_IP`: it only meaningfully rate-limits
+brute-force attempts when the relay sits behind a trusted reverse
+proxy that sets `X-Forwarded-For`/`X-Real-IP` correctly, per the
+earlier entry in this document.

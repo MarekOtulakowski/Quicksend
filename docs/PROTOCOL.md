@@ -255,10 +255,67 @@ handshake documented once the reconnect build step lands).
   between the two implementations fails a test rather than surfacing
   later as "sometimes doesn't connect."
 
+## Code+PAKE pairing (remote devices)
+
+Used when the two devices are in different networks and can't scan a
+QR code, so the shared secret has to be a short code a human can read
+over the phone/SMS/chat. Unlike QR pairing, the relay is involved in
+looking up which session a code refers to (see docs/DECISIONS.md for
+why this is safe against online brute-force), but the cryptographic
+key exchange itself is still entirely between the two clients.
+
+1. The receiver sends `create_code_session` (no payload). The relay
+   creates a session (internally identical to the QR flow's) and a
+   random 6-digit code bound to it, and replies with
+   `code_session_created`:
+   ```json
+   { "type": "code_session_created", "payload": { "code": "482193", "expiresAt": "2026-01-01T12:05:00Z" } }
+   ```
+   The receiver shows this code (e.g. as `482-193`) for the user to
+   read out over whatever channel they're using.
+2. The sender sends `join_by_code` with the code they were given:
+   ```json
+   { "type": "join_by_code", "payload": { "code": "482193" } }
+   ```
+   The relay looks this up (rate-limited per IP — see
+   docs/DECISIONS.md), consumes it (single-use), and — exactly like
+   QR's `join` — attaches the sender as guest and sends `paired` to
+   both sides. A wrong or expired code gets `error{code:
+   "invalid_code"}`; too many wrong guesses from one IP gets
+   `error{code: "too_many_attempts"}`.
+3. Once `paired`, the two clients run a SPAKE2 exchange using the code
+   itself as the PAKE password (relayed opaquely as `pake_msg` — the
+   relay never parses or sees the password). The host is always PAKE
+   role 0 (initiator), the guest role 1 (responder):
+   - Host: `init(code, 0)` → sends its message as `pake_msg`.
+   - Guest: `init(code, 1)`, waits for the host's `pake_msg`, calls
+     `update()` (this derives the guest's session key *and* its
+     response in one step) → sends the response as `pake_msg`.
+   - Host: receives the guest's `pake_msg`, calls `update()` (derives
+     its session key — nothing more to send).
+   ```json
+   { "type": "pake_msg", "payload": { "message": "<schollz/pake wire JSON>" } }
+   ```
+4. **Key confirmation.** SPAKE2 itself can't tell a wrong password from
+   a right one — both sides just silently derive different keys (see
+   docs/DECISIONS.md). So both sides then compute
+   `HMAC-SHA256(sessionKey, "quicksend-pake-confirm")` and exchange it:
+   ```json
+   { "type": "pake_confirm", "payload": { "tagHex": "<hex>" } }
+   ```
+   Each side compares the received tag against its own computed value.
+   Match → pairing is done, `sessionKey` is the epoch-0 root key (same
+   as QR). Mismatch → wrong code; each side independently detects this
+   (no relay involvement) and should end the session so both users know
+   to try again with a fresh code.
+
+PAKE runs as the WASM build of the same Go package
+(`schollz/pake/v3`) used to test this flow, not a separate JS SPAKE2
+implementation — see docs/DECISIONS.md for why, including the curve
+choice (P-256) and the real cost of shipping Go-compiled WASM.
+
 ## Not yet in this document
 
-- The code+PAKE pairing flow (`pake_msg`) for remote (different
-  network) pairing.
 - Reconnect: how a client re-attaches to its existing session, resumes
   a transfer, and how the epoch counter above stays synchronized.
 - File transfer: `file_meta` format, `chunk_ack`, `file_abort`,

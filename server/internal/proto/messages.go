@@ -9,7 +9,10 @@
 // relay parsing or understanding it, so it never needs to see plaintext.
 package proto
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Envelope is the wrapper for every control-plane message.
 type Envelope struct {
@@ -19,15 +22,27 @@ type Envelope struct {
 
 // Message types the relay itself acts on.
 const (
-	TypeCreateSession    = "create_session"
-	TypeSessionCreated   = "session_created"
-	TypeJoin             = "join"
-	TypePaired           = "paired"
-	TypeEndSession       = "end_session"
-	TypeSessionEnded     = "session_ended"
-	TypePeerDisconnected = "peer_disconnected"
-	TypePeerReconnected  = "peer_reconnected"
-	TypeError            = "error"
+	TypeCreateSession      = "create_session"
+	TypeSessionCreated     = "session_created"
+	TypeJoin               = "join"
+	TypeCreateCodeSession  = "create_code_session"
+	TypeCodeSessionCreated = "code_session_created"
+	TypeJoinByCode         = "join_by_code"
+	TypePaired             = "paired"
+	TypeEndSession         = "end_session"
+	TypeSessionEnded       = "session_ended"
+	TypePeerDisconnected   = "peer_disconnected"
+	TypePeerReconnected    = "peer_reconnected"
+	TypeError              = "error"
+)
+
+// Message types the two paired clients exchange directly, relayed
+// opaquely (see the package doc comment). Defined here purely for
+// documentation/discoverability and any Go-side test that needs to
+// construct one — the relay itself never switches on these.
+const (
+	TypePakeMsg     = "pake_msg"
+	TypePakeConfirm = "pake_confirm"
 )
 
 // SessionCreatedPayload is sent to the peer who called create_session,
@@ -40,6 +55,39 @@ type SessionCreatedPayload struct {
 // JoinPayload is sent by the second peer to attach to an existing session.
 type JoinPayload struct {
 	SessionID string `json:"sessionId"`
+}
+
+// CodeSessionCreatedPayload is sent to the peer who called
+// create_code_session, carrying the short human-readable pairing code
+// the other side must type in (never the sessionId itself — the code
+// is looked up server-side). This code is also the PAKE password the
+// two clients use to derive sessionKey themselves; the relay only
+// ever sees it as an opaque routing key.
+type CodeSessionCreatedPayload struct {
+	Code      string    `json:"code"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+// JoinByCodePayload is sent by the second peer to attach to a session
+// found by its human-readable pairing code.
+type JoinByCodePayload struct {
+	Code string `json:"code"`
+}
+
+// PakeMsgPayload carries one leg of the SPAKE2 exchange (the JSON
+// produced by schollz/pake's Pake.Bytes()) between the two clients.
+// The relay never parses this.
+type PakeMsgPayload struct {
+	Message string `json:"message"`
+}
+
+// PakeConfirmPayload carries the HMAC key-confirmation tag (see
+// docs/DECISIONS.md) each client sends after deriving its session key,
+// so both sides can detect a wrong pairing code instead of only
+// finding out from a later failed decryption. The relay never parses
+// this.
+type PakeConfirmPayload struct {
+	TagHex string `json:"tagHex"`
 }
 
 // SessionEndedPayload explains why a session was torn down.
@@ -68,4 +116,6 @@ const (
 	ErrCodeTooManySessions = "too_many_sessions"
 	ErrCodeInvalidMessage  = "invalid_message"
 	ErrCodeAlreadyPaired   = "already_in_session"
+	ErrCodeInvalidCode     = "invalid_code"
+	ErrCodeTooManyAttempts = "too_many_attempts"
 )

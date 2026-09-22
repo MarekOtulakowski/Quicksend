@@ -96,12 +96,20 @@ func (h *handler) beginSession(ctx context.Context, env proto.Envelope, ip strin
 			return nil, 0, errInvalidMessage
 		}
 		return h.hub.JoinSession(ctx, payload.SessionID, ip, c)
+	case proto.TypeCreateCodeSession:
+		return h.hub.CreateCodeSession(ctx, ip, c)
+	case proto.TypeJoinByCode:
+		var payload proto.JoinByCodePayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return nil, 0, errInvalidMessage
+		}
+		return h.hub.JoinByCode(ctx, payload.Code, ip, c)
 	default:
 		return nil, 0, errInvalidMessage
 	}
 }
 
-var errInvalidMessage = errors.New("first message must be create_session or join")
+var errInvalidMessage = errors.New("first message must be create_session, join, create_code_session, or join_by_code")
 
 // isEndSession reports whether data is a text control message with
 // type "end_session", without otherwise interpreting it. Everything
@@ -136,6 +144,10 @@ func errCode(err error) string {
 		return proto.ErrCodeSessionNotFound
 	case errors.Is(err, session.ErrSessionFull):
 		return proto.ErrCodeSessionFull
+	case errors.Is(err, session.ErrInvalidCode):
+		return proto.ErrCodeInvalidCode
+	case errors.Is(err, session.ErrTooManyAttempts):
+		return proto.ErrCodeTooManyAttempts
 	default:
 		return proto.ErrCodeInvalidMessage
 	}

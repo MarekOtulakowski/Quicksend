@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +61,8 @@ func testConfig() config.Config {
 		MaxSessionsPerIP:         2,
 		SessionInactivityTimeout: time.Minute,
 		ReconnectGracePeriod:     30 * time.Second,
+		PairingCodeTTL:           5 * time.Minute,
+		MaxPairingAttempts:       5,
 	}
 }
 
@@ -300,4 +303,155 @@ func TestReapDoesNothingBeforeAnyTimeoutElapses(t *testing.T) {
 		t.Error("session should not be reaped before any timeout elapses")
 	}
 	_ = s
+}
+
+func TestCreateCodeSessionSendsCode(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	host := &fakeConn{}
+
+	_, role, err := h.CreateCodeSession(context.Background(), "1.1.1.1", host)
+	if err != nil {
+		t.Fatalf("CreateCodeSession error = %v", err)
+	}
+	if role != RoleHost {
+		t.Errorf("role = %v, want RoleHost", role)
+	}
+	if len(host.sent) != 1 || host.sent[0].Type != proto.TypeCodeSessionCreated {
+		t.Fatalf("host received %v, want [code_session_created]", host.types())
+	}
+	var payload proto.CodeSessionCreatedPayload
+	if err := json.Unmarshal(host.sent[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if len(payload.Code) != 6 {
+		t.Errorf("code = %q, want 6 digits", payload.Code)
+	}
+	for _, c := range payload.Code {
+		if c < '0' || c > '9' {
+			t.Errorf("code = %q, want all digits", payload.Code)
+		}
+	}
+}
+
+func TestJoinByCodePairsBothPeers(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	host := &fakeConn{}
+	guest := &fakeConn{}
+
+	h.CreateCodeSession(context.Background(), "1.1.1.1", host)
+	var created proto.CodeSessionCreatedPayload
+	json.Unmarshal(host.sent[0].Payload, &created)
+
+	_, role, err := h.JoinByCode(context.Background(), created.Code, "2.2.2.2", guest)
+	if err != nil {
+		t.Fatalf("JoinByCode error = %v", err)
+	}
+	if role != RoleGuest {
+		t.Errorf("role = %v, want RoleGuest", role)
+	}
+	if got := guest.types(); len(got) != 1 || got[0] != proto.TypePaired {
+		t.Errorf("guest messages = %v, want [paired]", got)
+	}
+	if got := host.types(); len(got) != 2 || got[1] != proto.TypePaired {
+		t.Errorf("host messages = %v, want [code_session_created paired]", got)
+	}
+}
+
+func TestJoinByCodeWrongCodeFails(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	host := &fakeConn{}
+	h.CreateCodeSession(context.Background(), "1.1.1.1", host)
+	var created proto.CodeSessionCreatedPayload
+	json.Unmarshal(host.sent[0].Payload, &created)
+
+	wrong := "000000"
+	if wrong == created.Code {
+		wrong = "111111"
+	}
+	if _, _, err := h.JoinByCode(context.Background(), wrong, "2.2.2.2", &fakeConn{}); err != ErrInvalidCode {
+		t.Errorf("err = %v, want ErrInvalidCode", err)
+	}
+}
+
+func TestJoinByCodeIsSingleUse(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	host := &fakeConn{}
+	h.CreateCodeSession(context.Background(), "1.1.1.1", host)
+	var created proto.CodeSessionCreatedPayload
+	json.Unmarshal(host.sent[0].Payload, &created)
+
+	if _, _, err := h.JoinByCode(context.Background(), created.Code, "2.2.2.2", &fakeConn{}); err != nil {
+		t.Fatalf("first JoinByCode failed: %v", err)
+	}
+	// Second attempt with the same code, from a third party, must fail
+	// even though the underlying session might still have a free-ish
+	// state momentarily — the code itself is already consumed.
+	if _, _, err := h.JoinByCode(context.Background(), created.Code, "3.3.3.3", &fakeConn{}); err != ErrInvalidCode {
+		t.Errorf("err = %v, want ErrInvalidCode (code must be single-use)", err)
+	}
+}
+
+func TestJoinByCodeExpiredFails(t *testing.T) {
+	cfg := testConfig()
+	cfg.PairingCodeTTL = 5 * time.Minute
+	h, now := newTestHub(cfg)
+	host := &fakeConn{}
+	h.CreateCodeSession(context.Background(), "1.1.1.1", host)
+	var created proto.CodeSessionCreatedPayload
+	json.Unmarshal(host.sent[0].Payload, &created)
+
+	*now = now.Add(5*time.Minute + time.Second)
+
+	if _, _, err := h.JoinByCode(context.Background(), created.Code, "2.2.2.2", &fakeConn{}); err != ErrInvalidCode {
+		t.Errorf("err = %v, want ErrInvalidCode after TTL expiry", err)
+	}
+}
+
+func TestJoinByCodeRateLimitsWrongGuessesPerIP(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxPairingAttempts = 5
+	h, _ := newTestHub(cfg)
+	host := &fakeConn{}
+	h.CreateCodeSession(context.Background(), "1.1.1.1", host)
+	var created proto.CodeSessionCreatedPayload
+	json.Unmarshal(host.sent[0].Payload, &created)
+
+	attackerIP := "6.6.6.6"
+	for i := 0; i < 5; i++ {
+		wrong := fmt.Sprintf("%06d", i+900000) // won't collide with the real code in practice
+		if _, _, err := h.JoinByCode(context.Background(), wrong, attackerIP, &fakeConn{}); err != ErrInvalidCode {
+			t.Fatalf("attempt %d: err = %v, want ErrInvalidCode", i, err)
+		}
+	}
+
+	// 6th attempt from the same IP is throttled, even with the *correct* code.
+	if _, _, err := h.JoinByCode(context.Background(), created.Code, attackerIP, &fakeConn{}); err != ErrTooManyAttempts {
+		t.Errorf("err = %v, want ErrTooManyAttempts", err)
+	}
+
+	// A different IP is unaffected and can still use the correct code.
+	if _, _, err := h.JoinByCode(context.Background(), created.Code, "7.7.7.7", &fakeConn{}); err != nil {
+		t.Errorf("JoinByCode from a fresh IP should succeed, got %v", err)
+	}
+}
+
+func TestJoinByCodeGuessBudgetResetsAfterWindow(t *testing.T) {
+	cfg := testConfig()
+	cfg.PairingCodeTTL = 5 * time.Minute
+	cfg.MaxPairingAttempts = 5
+	h, now := newTestHub(cfg)
+	ip := "8.8.8.8"
+
+	for i := 0; i < 5; i++ {
+		h.JoinByCode(context.Background(), fmt.Sprintf("%06d", i), ip, &fakeConn{})
+	}
+	if _, _, err := h.JoinByCode(context.Background(), "999999", ip, &fakeConn{}); err != ErrTooManyAttempts {
+		t.Fatalf("expected budget exhausted, got %v", err)
+	}
+
+	*now = now.Add(cfg.PairingCodeTTL + time.Second)
+
+	if _, _, err := h.JoinByCode(context.Background(), "999999", ip, &fakeConn{}); err != ErrInvalidCode {
+		t.Errorf("after window reset, err = %v, want ErrInvalidCode (budget should have reset, not still blocked)", err)
+	}
 }
