@@ -1,3 +1,16 @@
+{
+	# Browsers/curl generally don't send the TLS SNI extension when
+	# connecting to a bare IP address (RFC 6066 says SNI shouldn't
+	# carry IP literals), so without this, Caddy has no way to know
+	# which site's certificate to present to a connection that gives
+	# no server name — and refuses the handshake outright. This makes
+	# it fall back to QUICKSEND_DOMAIN's certificate in that case,
+	# which is exactly what's needed when QUICKSEND_DOMAIN is itself a
+	# LAN IP for local testing (see docs/DECISIONS.md). Harmless for a
+	# real public domain, where clients do send SNI.
+	default_sni {$QUICKSEND_DOMAIN}
+}
+
 {$QUICKSEND_DOMAIN} {
 	reverse_proxy quicksend:8080
 }

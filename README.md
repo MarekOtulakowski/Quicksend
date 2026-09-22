@@ -31,15 +31,41 @@ docker build -t quicksend .
 docker run -d --name quicksend -p 8080:8080 quicksend
 ```
 
-Open `http://localhost:8080`. To try it between two devices on the
-same network, use your machine's LAN IP instead of `localhost` (camera
-QR-scanning inside the page requires HTTPS or `localhost`; opening a
-shared link directly, or pasting it, works over plain HTTP too — see
-[docs/DECISIONS.md](docs/DECISIONS.md)).
+Open `http://localhost:8080` — that's enough to look around the UI on
+one machine, but **not** enough to actually pair two devices or send a
+file: browsers only expose the Web Crypto API Quicksend needs for
+*any* of that in a secure context (HTTPS, or literally `localhost`),
+never over plain HTTP to a LAN IP. Pairing itself can look like it
+works there (it only needs `crypto.getRandomValues`, which has no such
+restriction), but everything after it — PAKE confirmation, encryption,
+reconnect tokens — silently fails. See "LAN testing between two real
+devices" below for the actual way to try it across devices, and
+[docs/DECISIONS.md](docs/DECISIONS.md) for why.
 
 For real use, put a reverse proxy (Caddy, Traefik, Cloudflare Tunnel)
 in front for TLS — the container itself only speaks plain HTTP and is
 not meant to be exposed directly to the internet.
+
+### LAN testing between two real devices
+
+The plain `docker run` above only serves plain HTTP, which — per the
+note above — isn't a secure context except on `localhost` itself, so
+it can't actually pair two *different* devices. To test for real
+between, say, a phone and a computer on the same network without a
+public domain, use [`docker-compose.yml`](docker-compose.yml) (see
+"Production deployment" below) with `QUICKSEND_DOMAIN` set to your
+machine's LAN IP instead of a real domain:
+
+```sh
+cp .env.example .env
+# edit .env: QUICKSEND_DOMAIN=<your machine's LAN IP, e.g. 192.168.1.42>
+docker compose up -d
+```
+
+Caddy can't get a Let's Encrypt certificate for a bare IP, so it falls
+back to a self-signed one automatically — every device will show a
+certificate warning once, which is expected; accept it to continue.
+Open `https://<that LAN IP>` on both devices.
 
 ### Production deployment
 
@@ -117,8 +143,12 @@ more).
 - Sharing the pairing link/code via the native share sheet or
   clipboard, with a persistent warning that whoever has it can join
   the transfer
-- Saving via the File System Access API, with an in-memory Blob
-  fallback for browsers without it
+- Saving via the File System Access API — pick a destination folder
+  once and every file writes straight into it with no further
+  per-file dialogs, falling back to a per-file save prompt or an
+  in-memory Blob download on browsers without that API
+- A clear error instead of a silent failure when the page is opened
+  somewhere Web Crypto isn't available (see "LAN testing" above)
 - Light/dark theme, Polish/English UI
 - `docker-compose.yml` for a production deployment behind Caddy
   (automatic TLS, relay never directly exposed)

@@ -163,6 +163,23 @@ function advance(container, next) {
 }
 
 export function initPairing(container) {
+  // Everything past the initial QR-fragment key exchange (PAKE
+  // confirmation, reconnect tokens, and all file encryption) needs
+  // crypto.subtle, which browsers only expose in a secure context
+  // (HTTPS, or the literal hosts localhost/127.0.0.1) — never plain
+  // HTTP to a LAN IP, even though *reaching* the page and parsing a
+  // pairing link both still work there (they only need
+  // crypto.getRandomValues, which has no such restriction). Without
+  // this check, that mismatch used to fail silently: pairing itself
+  // would appear to succeed, then every screen after it would just
+  // never render, with the actual TypeError only visible in the
+  // browser console. See docs/DECISIONS.md.
+  if (!window.isSecureContext) {
+    currentState = { screen: "insecure-context" };
+    render(container);
+    return;
+  }
+
   const detected = location.hash.length > 1 ? parsePairingText(location.hash) : null;
   if (detected) {
     // Don't leave sessionKey sitting in the visible URL/history any
@@ -245,7 +262,15 @@ function render(container) {
     case "error":
       renderError(container);
       break;
+    case "insecure-context":
+      renderInsecureContext(container);
+      break;
   }
+}
+
+function renderInsecureContext(container) {
+  container.appendChild(paragraph(t("insecureContextTitle"), "error-text"));
+  container.appendChild(paragraph(t("insecureContextBody"), "muted"));
 }
 
 function button(label, onClick, className) {

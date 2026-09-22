@@ -638,10 +638,10 @@ a copy-then-manually-open-the-app-then-paste round trip. Clipboard
 Write is the desktop-friendly fallback where a share sheet either
 doesn't exist or is less natural. The final manual-copy hint exists
 because both APIs generally require a secure context (HTTPS or
-localhost); the README already documents that plain-HTTP LAN use is
-supported for pasting a link, so the fallback chain has to degrade to
-"you can still read and copy this text yourself" rather than silently
-doing nothing.
+localhost), which — as later discovered and corrected in README.md —
+plain HTTP to a LAN IP never is, so the fallback chain has to degrade
+to "you can still read and copy this text yourself" rather than
+silently doing nothing.
 
 **Why the warning is always visible, not just shown after clicking
 Share:** the security-relevant fact — that this URL *is* full access to
@@ -776,3 +776,127 @@ in this environment) and correctly issues an HTTP→HTTPS redirect, and
 ran a full Playwright pairing-and-transfer test through
 `https://localhost` end-to-end — proving the WebSocket upgrade, not
 just plain HTTP requests, actually survives Caddy's proxying.
+
+## Real-device bug: plain-HTTP LAN use silently broke everything past pairing
+
+**What:** reported by the user testing against the Docker Desktop
+container from a phone on the LAN: pairing via QR appeared to succeed
+("Paired!" showed on both sides), but neither side ever got a working
+transfer screen — no file picker for the sender, no "waiting for
+files" for the receiver, no visible error at all. Root-caused by
+reproducing it with Playwright pointed at the machine's real LAN IP
+(`http://<LAN IP>:8080`, exactly matching README's own — as it turned
+out, wrong — advice) instead of `localhost`: `window.isSecureContext`
+is `false` and `window.crypto.subtle` is `undefined` there, and every
+uncaught `TypeError` from calling into it (`deriveReconnectToken`
+right after pairing, `deriveEpochKey` when the transfer UI tries to
+render) was silently swallowed by a missing `.catch()`, so the
+observable symptom was just "nothing happens."
+
+**Why plain HTTP to a LAN IP breaks this and `localhost` doesn't:**
+browsers only expose the Web Crypto API (`crypto.subtle`) in a
+"secure context" — HTTPS, or the special-cased `localhost`/`127.0.0.1`
+— never plain HTTP to any other host, including a private LAN address.
+`crypto.getRandomValues` has no such restriction, which is exactly why
+pairing (QR fragment key generation) looked fine while everything
+downstream of it (PAKE confirmation, the reconnect token, all file
+encryption) silently failed. This had gone unnoticed through every
+earlier build step because every test — the entire Playwright test
+suite built up over this whole project — ran against `http://localhost`,
+which is exempt from the restriction by spec; nothing in automated
+testing ever exercised the actual cross-device LAN scenario the app
+exists for.
+
+**Two-part fix:**
+
+1. **Fail loudly instead of silently** (`web/pairing.js`'s
+   `initPairing`): check `window.isSecureContext` up front, before
+   rendering anything else, and show a plain-language error explaining
+   why and how to fix it, instead of letting the app half-render and
+   leave the user staring at nothing. This alone doesn't restore
+   functionality on an insecure origin (nothing can — it's a browser
+   platform restriction, not a bug fixable in application code without
+   hand-rolling cryptography, which is out of scope by the original
+   brief), but turns an undiagnosable silent failure into an
+   actionable message.
+2. **Give LAN testing a real working path**: `docker-compose.yml`
+   already existed for production use with a real domain; the fix
+   documents (README's new "LAN testing between two real devices"
+   section) using the *same* compose file with `QUICKSEND_DOMAIN` set
+   to the LAN IP instead. This surfaced a second, narrower bug in the
+   Caddyfile itself — see the next entry.
+
+**Verified** against the exact failure mode: reproduced the silent
+failure on plain HTTP to a real LAN IP via Playwright first (confirming
+the diagnosis, not just theorizing about it), confirmed the new error
+screen appears and blocks role-select instead, then confirmed a full
+pairing-and-transfer flow succeeds end-to-end once served over HTTPS
+via docker-compose with the LAN IP as `QUICKSEND_DOMAIN`.
+
+## Caddy needs `default_sni` for a bare-IP `QUICKSEND_DOMAIN`
+
+**What:** using a LAN IP address as `QUICKSEND_DOMAIN` (per the fix
+above) failed at the TLS layer even though Caddy had already obtained
+a valid certificate for that exact identifier — every connection to
+`https://<LAN IP>` got a generic TLS "internal error" alert, both from
+curl and from real Chromium. Fixed by adding a global `default_sni
+{$QUICKSEND_DOMAIN}` option to the Caddyfile.
+
+**Why:** TLS's SNI extension is meant to carry a hostname, and RFC 6066
+says clients shouldn't send it for literal IP addresses — in practice,
+neither curl nor Chromium send SNI when connecting to a bare IP.
+Caddy's automatic HTTPS normally picks which certificate to present
+for a connection by matching the ClientHello's SNI against its
+per-site configuration; with no SNI sent at all, it had nothing to
+match against and refused the handshake outright, *despite* already
+holding a perfectly valid certificate for the one site actually
+configured. `default_sni` tells Caddy which name to assume when a
+connection arrives with no SNI, which is exactly the "bare IP, no
+hostname" case. This is invisible for the real production case (a
+public domain), since normal browsers always send SNI for an actual
+hostname — it only bites the "use an IP as a stand-in domain for local
+testing" case this fix specifically exists for.
+
+**Verified** the same way as the fix above: curl and a real (non-mocked)
+Chromium browser both reached `https://<LAN IP>/` successfully after
+adding this option, both having failed identically before it.
+
+## Choosing a save folder once instead of a dialog per file
+
+**What:** `file-writer.js` gained `chooseSaveDirectory()` (wraps
+`showDirectoryPicker({mode: "readwrite"})`) and `createFileSink` now
+accepts an optional `FileSystemDirectoryHandle`; when given one, it
+creates the file directly inside that folder
+(`dirHandle.getFileHandle(name, {create: true})`) with no dialog at
+all. `transfer-ui.js`'s receiver screen shows a "Choose save folder"
+button that, once clicked, applies to every file received for the
+rest of that session — falling back to the original per-file
+`showSaveFilePicker` prompt (and from there, the Blob-download
+fallback) for anyone who skips it or whose browser lacks
+`showDirectoryPicker`.
+
+**Why a button the user must click, not something automatic:**
+`showDirectoryPicker`, like `showSaveFilePicker`, only works in
+response to a genuine user gesture — calling it automatically (e.g.
+as soon as the receiver screen renders) throws, since there's no click
+to satisfy the browser's transient-activation requirement. This is a
+hard platform constraint, not a design choice: the "ask once, remember
+it" flow the user asked for is only reachable by making that one ask
+an explicit click.
+
+**Why filenames get deduplicated (`" (1)"`, `" (2)"`, ...) only in this
+mode:** writing straight into a chosen folder means a second file with
+the same name as an earlier one in the same session would silently
+overwrite it via `getFileHandle(name, {create: true})` — there's no
+per-file dialog left for the user to notice and rename it themselves,
+unlike the two fallback modes (a native save dialog, or a browser's own
+download-manager renaming) which both already handle that on their
+own. A simple in-memory `Set` of names used so far in this render is
+enough; it resets if the user picks a different folder mid-session.
+
+**Verified** with Playwright end-to-end over the real HTTPS deployment:
+sent two files with the identical name after choosing a folder (backed
+by a real origin-private-file-system directory handle, since
+`showDirectoryPicker` itself can't be driven headlessly) and confirmed
+both landed on "disk" as distinct files (`same-name.txt` and
+`same-name (1).txt`), not one silently overwriting the other.

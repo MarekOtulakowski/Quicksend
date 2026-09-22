@@ -8,7 +8,7 @@
 import { t } from "./i18n.js";
 import { deriveEpochKey } from "./crypto.js";
 import { sendFile, attachReceiver } from "./transfer.js";
-import { createFileSink, BLOB_FALLBACK_WARN_BYTES } from "./file-writer.js";
+import { createFileSink, chooseSaveDirectory, hasDirectoryAccess, BLOB_FALLBACK_WARN_BYTES } from "./file-writer.js";
 
 /** Picks the status text for a canceled transfer: the relay's own
  * size-limit cancellation (see server/internal/session's
@@ -137,10 +137,65 @@ function renderSenderTransfer(container, socket, epochKey) {
   return { detach: () => {}, isActive: () => sending };
 }
 
+/** Picks a name that isn't already in usedNames, appending " (1)",
+ * " (2)", etc. before the extension if needed, and records whichever
+ * name it returns. Only matters once files are written straight into
+ * a chosen folder (see chooseSaveDirectory) without per-file dialogs
+ * — a per-file showSaveFilePicker or the Blob-download fallback both
+ * already let the user (or the browser) handle a name collision on
+ * their own. */
+export function dedupeFilename(usedNames, name) {
+  if (!usedNames.has(name)) {
+    usedNames.add(name);
+    return name;
+  }
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  let candidate;
+  let i = 1;
+  do {
+    candidate = `${base} (${i})${ext}`;
+    i++;
+  } while (usedNames.has(candidate));
+  usedNames.add(candidate);
+  return candidate;
+}
+
 function renderReceiverTransfer(container, socket, epochKey) {
   const status = document.createElement("p");
   status.textContent = t("transferWaitingForFiles");
   container.appendChild(status);
+
+  // Asking once for a destination folder — instead of a native save
+  // dialog per incoming file — needs a directory handle obtained from
+  // a real click (browsers require a user gesture for
+  // showDirectoryPicker, so this can't happen automatically). If the
+  // user never clicks it, or the browser doesn't support it at all,
+  // each file falls back to its own per-file prompt as before.
+  let saveDirHandle = null;
+  const usedNames = new Set();
+
+  if (hasDirectoryAccess()) {
+    const folderRow = document.createElement("p");
+    folderRow.className = "muted";
+    const chooseBtn = document.createElement("button");
+    chooseBtn.type = "button";
+    chooseBtn.textContent = t("chooseSaveFolderButton");
+    const folderStatus = document.createElement("span");
+    chooseBtn.addEventListener("click", async () => {
+      const handle = await chooseSaveDirectory();
+      if (handle) {
+        saveDirHandle = handle;
+        usedNames.clear();
+        chooseBtn.textContent = t("changeSaveFolderButton");
+        folderStatus.textContent = ` ${t("saveFolderChosenPrefix")} "${handle.name}"`;
+      }
+    });
+    folderRow.appendChild(chooseBtn);
+    folderRow.appendChild(folderStatus);
+    container.appendChild(folderRow);
+  }
 
   const list = document.createElement("ul");
   list.className = "file-list";
@@ -154,7 +209,8 @@ function renderReceiverTransfer(container, socket, epochKey) {
       receiving = true;
       status.textContent = t("transferReceivingFiles");
       const row = createFileRow(list, name, size);
-      const sink = await createFileSink(name, mime);
+      const saveName = saveDirHandle ? dedupeFilename(usedNames, name) : name;
+      const sink = await createFileSink(saveName, mime, saveDirHandle);
       rows[fileId] = { ...row, sink, received: 0, size, done: false };
 
       if (sink.mode === "blob" && size > BLOB_FALLBACK_WARN_BYTES) {

@@ -15,12 +15,56 @@ export function hasFileSystemAccess() {
   return typeof window.showSaveFilePicker === "function";
 }
 
+export function hasDirectoryAccess() {
+  return typeof window.showDirectoryPicker === "function";
+}
+
+/**
+ * Lets the user pick a folder once; every file passed to createFileSink
+ * afterward (via its dirHandle argument) is written straight into it,
+ * with no further per-file save dialogs. Must be called directly from
+ * a click handler — like showSaveFilePicker, browsers only allow this
+ * in response to a genuine user gesture. Returns null if the user
+ * cancels or the API isn't available, in which case callers should
+ * fall back to createFileSink's per-file picker.
+ */
+export async function chooseSaveDirectory() {
+  if (!hasDirectoryAccess()) return null;
+  try {
+    return await window.showDirectoryPicker({ mode: "readwrite" });
+  } catch {
+    return null; // cancelled, or permission denied
+  }
+}
+
 /**
  * Creates a sink for one incoming file. Returns
  * { write(chunk), close(), abort(), mode: "fsa"|"blob" }.
  * write/close/abort all return Promises.
+ *
+ * If dirHandle (a FileSystemDirectoryHandle from chooseSaveDirectory)
+ * is given, the file is created directly inside it — no dialog at
+ * all. Otherwise falls back to a per-file showSaveFilePicker prompt,
+ * and finally to an in-memory Blob download if neither API is usable.
  */
-export async function createFileSink(name, mime) {
+export async function createFileSink(name, mime, dirHandle) {
+  if (dirHandle) {
+    try {
+      const handle = await dirHandle.getFileHandle(name, { create: true });
+      const writable = await handle.createWritable();
+      return {
+        mode: "fsa",
+        write: (chunk) => writable.write(chunk),
+        close: () => writable.close(),
+        abort: () => writable.abort(),
+      };
+    } catch {
+      // e.g. a name the filesystem rejects, or permission revoked
+      // mid-session — fall through to the per-file picker below
+      // rather than failing the transfer outright.
+    }
+  }
+
   if (hasFileSystemAccess()) {
     try {
       const handle = await window.showSaveFilePicker({ suggestedName: name });

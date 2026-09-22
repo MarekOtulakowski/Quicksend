@@ -61,6 +61,8 @@ export const STRINGS = {
     errSessionEnded: "Sesja zakończona — drugie urządzenie nie wróciło na czas.",
     errGeneric: "Coś poszło nie tak. Spróbuj ponownie.",
     tryAgain: "Spróbuj ponownie",
+    insecureContextTitle: "Brak bezpiecznego połączenia",
+    insecureContextBody: "Ta strona jest otwarta pod zwykłym http:// pod adresem innym niż localhost, więc przeglądarka blokuje szyfrowanie (Web Crypto), którego Quicksend wymaga do parowania i przesyłania plików. Otwórz stronę przez HTTPS — np. uruchamiając docker-compose.yml z Caddy jako reverse proxy (ustaw QUICKSEND_DOMAIN na adres IP tego urządzenia w sieci lokalnej i zaakceptuj ostrzeżenie o certyfikacie na każdym urządzeniu) — albo testuj wyłącznie przez localhost.",
     reconnecting: "Połączenie przerwane, próba wznowienia…",
 
     swapRolesButton: "Zamień się rolami",
@@ -71,6 +73,9 @@ export const STRINGS = {
 
     transferSenderHint: "Wybierz pliki do wysłania",
     transferWaitingForFiles: "Czekam na pliki…",
+    chooseSaveFolderButton: "Wybierz folder zapisu",
+    changeSaveFolderButton: "Zmień folder zapisu",
+    saveFolderChosenPrefix: "Pliki będą zapisywane w folderze",
     transferReceivingFiles: "Odbieranie plików…",
     transferSending: "Wysyłanie…",
     transferSent: "Wysłano",
@@ -144,6 +149,8 @@ export const STRINGS = {
     errSessionEnded: "Session ended — the other device didn't come back in time.",
     errGeneric: "Something went wrong. Please try again.",
     tryAgain: "Try again",
+    insecureContextTitle: "No secure connection",
+    insecureContextBody: "This page is open over plain http:// at an address other than localhost, so the browser blocks the encryption (Web Crypto) Quicksend needs for pairing and file transfer. Open it over HTTPS instead — e.g. run docker-compose.yml with Caddy as a reverse proxy (set QUICKSEND_DOMAIN to this device's LAN IP and accept the certificate warning on each device) — or test over localhost only.",
     reconnecting: "Connection lost, trying to reconnect…",
 
     swapRolesButton: "Swap roles",
@@ -154,6 +161,9 @@ export const STRINGS = {
 
     transferSenderHint: "Choose files to send",
     transferWaitingForFiles: "Waiting for files…",
+    chooseSaveFolderButton: "Choose save folder",
+    changeSaveFolderButton: "Change save folder",
+    saveFolderChosenPrefix: "Files will be saved to",
     transferReceivingFiles: "Receiving files…",
     transferSending: "Sending…",
     transferSent: "Sent",
