@@ -128,3 +128,91 @@ main {
 p.muted {
   color: var(--fg-muted);
 }
+
+.pairing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  text-align: center;
+}
+
+.role-row {
+  display: flex;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.role-row button {
+  flex: 1;
+}
+
+button {
+  font: inherit;
+  padding: 0.65rem 1.1rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.primary-button {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+
+.qr-canvas {
+  background: #ffffff;
+  padding: 12px;
+  border-radius: 12px;
+  image-rendering: pixelated;
+}
+
+.qr-video {
+  width: 100%;
+  max-width: 320px;
+  border-radius: 12px;
+  background: #000;
+}
+
+.pairing-link {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  word-break: break-all;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  width: 100%;
+}
+
+.paste-input {
+  width: 100%;
+  min-height: 4.5rem;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  resize: vertical;
+}
+
+.status-paired {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.error-text {
+  color: var(--danger);
+}

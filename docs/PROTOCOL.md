@@ -151,6 +151,48 @@ All configurable via environment variables (see README):
   after one peer disconnects, waiting for it to reconnect, before the
   other peer is told `session_ended`.
 
+## QR pairing (physically-together devices)
+
+Used when both devices are in the same place. No PAKE is involved —
+the shared secret is generated locally by the receiver and carried
+optically (QR) or via a pasted link, never typed by a human, so it can
+be full-strength random rather than a short code.
+
+1. The receiver opens a WebSocket, sends `create_session`, and gets
+   back `session_created` with a `sessionId`.
+2. The receiver generates a random 32-byte `sessionKey`
+   (`crypto.getRandomValues`) — this never touches the relay.
+3. The receiver builds a URL:
+   ```
+   https://<host>/<path>#s=<sessionId>&k=<sessionKey, base64url, unpadded>
+   ```
+   and displays it as a QR code, plus as plain selectable text as a
+   fallback. `Referrer-Policy: no-referrer` (set via a `<meta>` tag)
+   and keeping the key in the fragment (`#`, never `?`) keep it out of
+   HTTP requests, `Referer` headers, and server logs.
+4. The sender obtains that URL one of three ways, all converging on
+   the same join step:
+   - **Scanning the QR** with the page's own camera (jsQR decoding
+     live video frames) — useful for a laptop scanning a phone's QR
+     or vice versa.
+   - **Opening the link directly** — the common case when a phone's
+     *native* camera app scans the QR, since that just navigates to
+     the URL. On load, the page detects `#s=...&k=...` in its own
+     URL, immediately scrubs it from the visible address bar/history
+     (`history.replaceState`) so the key doesn't linger there, and
+     shows a "join this session?" confirmation before connecting.
+   - **Pasting the link manually** — fallback if scanning isn't
+     available (no camera permission, desktop without a webcam
+     pointed at anything, etc).
+5. The sender opens a WebSocket and sends `join` with `sessionId`
+   extracted from the URL fragment. `sessionKey` is extracted from the
+   same fragment and never sent anywhere.
+6. Both sides receive `paired` and now hold the same `sessionKey`,
+   ready to use as the epoch-0 root key (see "Cryptography" below).
+
+QR codes are always rendered black-on-white regardless of the app's
+light/dark theme, for maximum scanner compatibility.
+
 ## Cryptography
 
 None of this runs on the relay — it only ever forwards ciphertext it
@@ -215,8 +257,8 @@ handshake documented once the reconnect build step lands).
 
 ## Not yet in this document
 
-- Pairing key exchange: QR fragment format and the code+PAKE flow
-  (`pake_msg`).
+- The code+PAKE pairing flow (`pake_msg`) for remote (different
+  network) pairing.
 - Reconnect: how a client re-attaches to its existing session, resumes
   a transfer, and how the epoch counter above stays synchronized.
 - File transfer: `file_meta` format, `chunk_ack`, `file_abort`,

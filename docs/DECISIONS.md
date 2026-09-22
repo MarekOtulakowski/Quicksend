@@ -180,3 +180,41 @@ implementations agree byte-for-byte, not just that each is internally
 consistent. A shared, versioned fixture file makes that guarantee
 explicit and keeps it from silently drifting if one side's test is
 edited without the other's.
+
+## Vendored QR libraries instead of a CDN or a bundler
+
+**What:** `web/vendor/qrcode-generator.js` (MIT, kazuhikoarase) and
+`web/vendor/jsQR.js` (Apache-2.0, cozmo/jsQR) are committed into the
+repo, each an unmodified upstream build plus one appended
+`export default ...;` line so they load as native ES modules. See
+`web/vendor/NOTICE.md` for exact source/version.
+
+**Why:** writing a QR encoder/decoder from scratch means reimplementing
+Reed–Solomon error correction and finder-pattern detection — real
+complexity worth not reinventing, unlike PAKE this isn't a security
+primitive, so reusing a small, long-established, permissively-licensed
+library is an ordinary engineering call rather than the kind of
+decision that needed sign-off first. Vendoring rather than pointing at
+a CDN keeps a self-hosted, privacy-focused tool from making runtime
+requests to a third party, and keeps it working in offline/air-gapped
+deployments. Both libraries are plain, dependency-free, single-file
+builds, which made a one-line ESM shim enough — no bundler needed.
+
+**Rejected:** pulling them from `cdn.jsdelivr.net` at runtime (rejected
+for the third-party-request reason above); a bundler-based build step
+just to get native ESM imports of these two files (unnecessary given
+the one-line shim works).
+
+## QR pairing link is scrubbed from the URL bar immediately on load
+
+**What:** When a page loads with `#s=...&k=...` already in its URL
+(the "opened the QR link directly" path), `pairing.js` calls
+`history.replaceState` to remove the fragment before showing the
+"join this session?" confirmation — not only if the user cancels.
+
+**Why:** the fragment contains `sessionKey`. Leaving it sitting in the
+visible address bar and in browser history for the whole confirmation
+step (or indefinitely, if the user never acts) is an easy-to-avoid
+exposure — a shoulder-surf, a screen share, or the browser's own
+history/autocomplete UI could all leak it for no benefit, since the
+key is already safely captured in memory by that point.
