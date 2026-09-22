@@ -15,7 +15,14 @@ import (
 
 	quicksend "github.com/MarekOtulakowski/Quicksend"
 	"github.com/MarekOtulakowski/Quicksend/server/internal/config"
+	"github.com/MarekOtulakowski/Quicksend/server/internal/session"
+	"github.com/MarekOtulakowski/Quicksend/server/internal/ws"
 )
+
+// reapInterval is how often the hub scans for idle/expired sessions.
+// It only needs to be finer-grained than the shortest configured
+// timeout so expiry is noticed promptly.
+const reapInterval = 5 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -33,8 +40,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	hub := session.NewHub(cfg)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.Handle("GET /ws", ws.NewHandler(hub))
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
 	srv := &http.Server{
@@ -45,6 +55,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go hub.Run(ctx, reapInterval)
 
 	go func() {
 		slog.Info("listening", "addr", cfg.ListenAddr)
