@@ -395,6 +395,12 @@ function renderCodeReceiverWaiting(container) {
   container.appendChild(paragraph(formatted, "pairing-code"));
 
   container.appendChild(paragraph(t("codeExpiryNote"), "muted"));
+
+  const shareStatus = paragraph("", "muted");
+  shareStatus.hidden = true;
+  container.appendChild(button(t("copyCodeButton"), () => shareOrCopy({ text: formatted }, shareStatus)));
+  container.appendChild(shareStatus);
+
   container.appendChild(button(t("backButton"), () => setState(container, { screen: "receive-method-select" })));
 }
 
@@ -465,6 +471,45 @@ function startJoinByCode(container, code) {
   });
 }
 
+/**
+ * Shares or copies a pairing secret (a URL carrying the QR link, or
+ * plain text for a pairing code) via whatever the browser supports,
+ * reporting the outcome in statusEl. Falls through in order:
+ *   1. The native share sheet (`navigator.share`), if available — the
+ *      user picking "cancel" there is not an error.
+ *   2. Copying to the clipboard (`navigator.clipboard.writeText`).
+ *   3. A hint to copy the already-visible text manually — the only
+ *      option left on a plain-HTTP LAN connection, where Clipboard
+ *      Write and often Web Share itself aren't available (both
+ *      generally require a secure context) — see README's note on
+ *      plain-HTTP LAN use still supporting manual paste.
+ * Only ever called directly from a click handler: both APIs require
+ * a user gesture.
+ */
+async function shareOrCopy({ url, text }, statusEl) {
+  if (navigator.share) {
+    try {
+      await navigator.share(url ? { url } : { text });
+      return;
+    } catch (err) {
+      if (err && err.name === "AbortError") return; // user dismissed the share sheet
+      // Otherwise fall through to the clipboard fallback below.
+    }
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(url || text);
+      statusEl.textContent = t("shareCopied");
+      statusEl.hidden = false;
+      return;
+    } catch {
+      // Fall through to the manual-copy hint below.
+    }
+  }
+  statusEl.textContent = t("shareCopyManually");
+  statusEl.hidden = false;
+}
+
 function renderReceiverWaiting(container) {
   container.appendChild(paragraph(t("receiverWaiting")));
 
@@ -475,6 +520,12 @@ function renderReceiverWaiting(container) {
 
   container.appendChild(paragraph(t("receiverLinkLabel"), "muted"));
   container.appendChild(paragraph(currentState.url, "pairing-link"));
+  container.appendChild(paragraph(t("shareSecurityWarning"), "warning-text"));
+
+  const shareStatus = paragraph("", "muted");
+  shareStatus.hidden = true;
+  container.appendChild(button(t("shareButton"), () => shareOrCopy({ url: currentState.url }, shareStatus)));
+  container.appendChild(shareStatus);
 
   container.appendChild(button(t("backButton"), () => setState(container, { screen: "receive-method-select" })));
 }

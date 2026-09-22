@@ -619,3 +619,51 @@ flight" one already covered above.
 swap's busy check** (see the entry above) — a genuinely mid-transfer
 cancel needed the sender's outgoing frames held back deterministically
 rather than racing real localhost throughput, for the same reason.
+
+## Link sharing: three-tier fallback, and a warning that's always visible
+
+**What:** the receiver's QR/link screen (and, as a small extra, the
+code+PAKE screen) got a "Share"/"Copy" button and a persistent security
+warning. The button tries, in order: `navigator.share` (native OS
+share sheet), then `navigator.clipboard.writeText` (silent copy), then
+falls back to just telling the user to copy the already-visible text
+manually. No wire-protocol change — this is a client-only convenience
+around a URL/code that already existed.
+
+**Why try Web Share before Clipboard Write:** on a phone (the case
+this matters most for — sending someone a link via whatever messaging
+app they actually use), the native share sheet is both more discoverable
+and lets the user pick the destination app directly, instead of forcing
+a copy-then-manually-open-the-app-then-paste round trip. Clipboard
+Write is the desktop-friendly fallback where a share sheet either
+doesn't exist or is less natural. The final manual-copy hint exists
+because both APIs generally require a secure context (HTTPS or
+localhost); the README already documents that plain-HTTP LAN use is
+supported for pasting a link, so the fallback chain has to degrade to
+"you can still read and copy this text yourself" rather than silently
+doing nothing.
+
+**Why the warning is always visible, not just shown after clicking
+Share:** the security-relevant fact — that this URL *is* full access to
+the pairing, not a harmless preview link — is exactly as true whether
+the user shares it via the button, screenshots the QR code, or reads
+it aloud. Gating the warning behind the Share button would miss every
+other way the link leaves the screen. This mirrors the threat model
+already documented in README.md: the link/QR carries the actual
+session key, so "don't send this to the wrong person" is the one thing
+worth surfacing unconditionally, not an opt-in tip.
+
+**Why the pairing *code* doesn't get the same warning:** a 6-digit
+code alone can't compromise anything — it's a PAKE password, not a key
+(see the "code doubles as routing key and PAKE password" decision
+above), and the whole design point of code+PAKE pairing is that the
+code is meant to be read out over an untrusted channel. It still got a
+"Copy code" button for convenience (pasting into a chat is a common
+real use), just without the warning that doesn't apply to it.
+
+**Verified with Playwright** against a real (non-mocked) `navigator.clipboard`,
+granted via the browser context's `clipboard-read`/`clipboard-write`
+permissions — confirming not just that a "copied" status appears, but
+that the clipboard's actual contents match the displayed link/code
+exactly, not just some copy attempt that silently copied the wrong
+string.

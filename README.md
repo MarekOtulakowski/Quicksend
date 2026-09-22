@@ -90,6 +90,9 @@ more).
   re-pairing (refused while a transfer is actively in progress)
 - Cancelling a single in-progress transfer, from either side, without
   ending the session
+- Sharing the pairing link/code via the native share sheet or
+  clipboard, with a persistent warning that whoever has it can join
+  the transfer
 - Saving via the File System Access API, with an in-memory Blob
   fallback for browsers without it
 - Light/dark theme, Polish/English UI

@@ -181,9 +181,15 @@ be full-strength random rather than a short code.
    https://<host>/<path>#s=<sessionId>&k=<sessionKey, base64url, unpadded>
    ```
    and displays it as a QR code, plus as plain selectable text as a
-   fallback. `Referrer-Policy: no-referrer` (set via a `<meta>` tag)
-   and keeping the key in the fragment (`#`, never `?`) keep it out of
-   HTTP requests, `Referer` headers, and server logs.
+   fallback, plus a "Share" button (native share sheet via
+   `navigator.share`, falling back to `navigator.clipboard.writeText`,
+   falling back to the manual-copy hint above if neither API is
+   available — e.g. over plain HTTP on a LAN). A persistent warning
+   next to the link makes clear that whoever has it can join the
+   transfer, since sharing it more broadly than intended is the whole
+   risk this URL carries. `Referrer-Policy: no-referrer` (set via a
+   `<meta>` tag) and keeping the key in the fragment (`#`, never `?`)
+   keep it out of HTTP requests, `Referer` headers, and server logs.
 4. The sender obtains that URL one of three ways, all converging on
    the same join step:
    - **Scanning the QR** with the page's own camera (jsQR decoding

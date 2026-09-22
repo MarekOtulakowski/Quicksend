@@ -17,6 +17,11 @@ export const STRINGS = {
     receiverGenerating: "Generowanie sesji…",
     receiverWaiting: "Zeskanuj ten kod na drugim urządzeniu",
     receiverLinkLabel: "Lub wklej ten link na drugim urządzeniu:",
+    shareSecurityWarning: "Każdy, kto ma ten link lub kod QR, może dołączyć do tego transferu. Udostępnij go tylko osobie, do której wysyłasz plik.",
+    shareButton: "Udostępnij",
+    shareCopied: "Skopiowano do schowka",
+    shareCopyManually: "Zaznacz i skopiuj powyższy tekst ręcznie",
+    copyCodeButton: "Kopiuj kod",
 
     senderChooseTitle: "Jak chcesz dołączyć?",
     senderScan: "Skanuj kamerą",
@@ -94,6 +99,11 @@ export const STRINGS = {
     receiverGenerating: "Generating session…",
     receiverWaiting: "Scan this code on the other device",
     receiverLinkLabel: "Or paste this link on the other device:",
+    shareSecurityWarning: "Anyone with this link or QR code can join this transfer. Only share it with the person you're sending the file to.",
+    shareButton: "Share",
+    shareCopied: "Copied to clipboard",
+    shareCopyManually: "Select and copy the text above manually",
+    copyCodeButton: "Copy code",
 
     senderChooseTitle: "How do you want to join?",
     senderScan: "Scan with camera",
