@@ -5,7 +5,12 @@
 
 export function connect() {
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  return new WebSocket(`${scheme}//${location.host}/ws`);
+  const socket = new WebSocket(`${scheme}//${location.host}/ws`);
+  // Binary frames (file chunks) arrive as ArrayBuffer rather than the
+  // default Blob, so transfer.js can wrap them in a Uint8Array
+  // synchronously instead of needing an async Blob.arrayBuffer() hop.
+  socket.binaryType = "arraybuffer";
+  return socket;
 }
 
 export function sendEnvelope(socket, type, payload) {

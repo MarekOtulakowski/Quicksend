@@ -18,6 +18,11 @@ import (
 	"github.com/MarekOtulakowski/Quicksend/server/internal/session"
 )
 
+// maxMessageSize must comfortably exceed a file chunk (see
+// transfer.js's CHUNK_SIZE, 256KiB) plus its framing overhead and
+// AES-GCM tag, with headroom to spare.
+const maxMessageSize = 1 << 20 // 1MiB
+
 type handler struct {
 	hub *session.Hub
 }
@@ -34,6 +39,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("websocket accept failed", "error", err)
 		return
 	}
+	// coder/websocket defaults to a 32KiB max message size, far below
+	// a 256KiB file chunk plus its framing overhead; without raising
+	// this, the first real chunk sent trips the limit and the relay
+	// silently closes the connection.
+	raw.SetReadLimit(maxMessageSize)
 
 	ip := clientIP(r)
 	c := newConn(raw)

@@ -327,3 +327,88 @@ The per-IP guess budget above inherits the same trust assumption as
 brute-force attempts when the relay sits behind a trusted reverse
 proxy that sets `X-Forwarded-For`/`X-Real-IP` correctly, per the
 earlier entry in this document.
+
+## Raised the relay's WebSocket message-size limit for file chunks
+
+**What:** `ws.maxMessageSize` (1MiB) is set via `Conn.SetReadLimit`
+right after accepting each connection.
+
+**Why:** found by an end-to-end test that hung, not by inspection —
+`coder/websocket` defaults to a 32KiB max message size. A 256KiB file
+chunk plus its framing overhead silently tripped this on the very
+first real chunk of any transfer, and the library's response to an
+oversized message is to close the connection, which surfaced as the
+*other* peer's socket going "already CLOSING/CLOSED" with no error
+pointing at the real cause. This is exactly the kind of
+protocol-mismatch bug the project's testing strategy (real WebSocket
+connections, not mocks) exists to catch before it ships.
+
+## Pairing host is always the file receiver, guest the sender (for now)
+
+**What:** `transfer-ui.js` shows the receiver UI to whichever side has
+pairing role "host" and the sender UI to "guest" — the same role a
+user picked by clicking "Receive" or "Send" during pairing (both QR's
+`create_session`/`join` and code's `create_code_session`/`join_by_code`
+always assign host to the "Receive" click and guest to "Send").
+
+**Why:** simplest possible mapping with zero extra coordination
+needed — the two roles are already established before pairing even
+finishes, so there's nothing left to negotiate. Role swap (a later
+build step) is what lets the two sides flip which one is currently
+sending without re-pairing; until then, whoever chose to receive is
+the receiver for the life of the session.
+
+## Metadata is encrypted like a chunk, at a reserved sentinel index
+
+**What:** File metadata (name/size/MIME) is encrypted with the same
+`EncryptChunk`/`encryptChunk` function used for file data, at chunk
+index `2^64-1` (`cryptoutil.MetadataChunkIndex` /
+`crypto.js`'s `METADATA_CHUNK_INDEX`), always with `last=true`.
+
+**Why:** avoids a second AEAD construction (nonce/AAD scheme) just for
+one small JSON blob per file. No real file could ever reach 2^64
+chunks (that's exabytes at 256KiB/chunk), so the index can never
+collide with real data. The test vector for this lives alongside the
+regular chunk vectors in `/testvectors/crypto_v1.json`, with the index
+itself hardcoded on both sides rather than round-tripped through JSON
+(2^64-1 can't survive a JS `Number` round-trip).
+
+## `chunk_ack` is sent after the sink handles the chunk, not after decryption
+
+**What:** `transfer.js`'s receiver only sends `chunk_ack` for a chunk
+once the caller's `onChunk` handler (e.g. `file-writer.js` writing it
+to disk) has resolved — decrypting it isn't enough. Message processing
+is serialized through a promise chain for the same reason.
+
+**Why:** found by writing a test with an artificially slow sink before
+wiring up the real UI, not by inspection. WebSocket `message` events
+fire as frames arrive regardless of whether a previous (async) handler
+has finished; without the fix, a chunk frame could start decrypting
+before `onFileStart` (a native save-file picker can block on user
+input for an arbitrary time) had finished setting up the current
+file's state, or the sender's flow-control window could race ahead of
+a slow sink and have a chunk silently dropped instead of properly
+backpressured. The fix: `await` the handler before acking, and funnel
+all incoming messages through one `Promise` chain so each is fully
+handled before the next starts.
+
+## Deferred for a later pass: ZIP bundling and Service Worker streaming
+
+**What:** two pieces of the original file-transfer design aren't in
+this build step: sending multiple files bundles them into a single
+streamed ZIP (store/no-compression) on the receiving end; and Service
+Worker–based streaming as a save fallback for browsers without the
+File System Access API (currently: File System Access API, else an
+in-memory Blob download with a size warning).
+
+**Why:** both are substantial, separable pieces of engineering — a
+correct streaming ZIP writer (local + central directory records, CRC32,
+large-file handling) and a Service Worker message-channel pipeline —
+that would have significantly inflated an already large build step
+without changing whether the core transfer (encryption, framing, flow
+control, saving) works correctly. Multiple files currently save as
+separate files instead of one ZIP; large files on browsers without
+File System Access currently fall back to buffering in memory (with a
+size warning) instead of a disk-backed streamed write. Both are
+reasonable v1 behavior, not silently dropped — flagged here and to the
+user rather than assumed away.

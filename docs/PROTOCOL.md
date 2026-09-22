@@ -314,12 +314,78 @@ PAKE runs as the WASM build of the same Go package
 implementation — see docs/DECISIONS.md for why, including the curve
 choice (P-256) and the real cost of shipping Go-compiled WASM.
 
+## File transfer
+
+Runs over an already-`paired` session. Pairing "host" is always the
+file receiver and "guest" the sender for this initial session (role
+swap, a later build step, is what lets them flip this without
+re-pairing) — see docs/DECISIONS.md.
+
+Files are sent one at a time, in order; a second file's `file_meta`
+only appears after the previous file's last chunk. Multiple selected
+files are currently saved as separate files, not bundled into a ZIP —
+see docs/DECISIONS.md for why that's deferred.
+
+### `file_meta` (sender → receiver, relayed opaquely)
+
+Announces one file. The relay never parses this — it's encrypted the
+same way a chunk is (see below), so the relay learns neither the
+plaintext metadata nor even that this particular message is metadata
+rather than transfer control chatter, beyond its message `type`.
+
+```json
+{ "type": "file_meta", "payload": { "fileId": "<32 hex chars>", "ciphertext": "<hex>" } }
+```
+
+`fileId` is 16 random bytes (hex-encoded) chosen by the sender, unique
+per file. `ciphertext` decrypts (see "Chunk encryption" in the
+Cryptography section) to:
+
+```json
+{ "name": "photo.jpg", "size": 123456, "mime": "image/jpeg" }
+```
+
+using the **reserved metadata chunk index** (`2^64-1`, `last=true`) in
+place of a real chunk index — see `cryptoutil.MetadataChunkIndex` /
+`crypto.js`'s `METADATA_CHUNK_INDEX`.
+
+### Chunk frame (binary WebSocket frame, sender → receiver)
+
+```
+byte 0      : frame type (0x01 = file chunk)
+byte 1      : flags (bit0 = last chunk of this file)
+bytes 2–17  : fileId (16 bytes, matches file_meta's)
+bytes 18–25 : chunk index (uint64 BE)
+bytes 26..  : AES-256-GCM ciphertext (with 16-byte tag) — see Cryptography
+```
+
+Plaintext chunks are up to 256 KiB (`transfer.js`'s `CHUNK_SIZE`); the
+last chunk of a file may be smaller (or, for an empty file, the only
+chunk, index 0, zero-length plaintext).
+
+### `chunk_ack` (receiver → sender, relayed opaquely)
+
+Sent after a chunk has been decrypted **and** handed to the receiver's
+sink (e.g. written to disk) — not merely decrypted — so it reflects
+the chunk being durably handled, not just received.
+
+```json
+{ "type": "chunk_ack", "payload": { "fileId": "<hex>", "ackedUpTo": 41 } }
+```
+
+### Flow control
+
+The sender keeps at most `WINDOW_SIZE` (8) chunks unacknowledged at
+once, pausing further reads/sends until `chunk_ack`s catch up —
+backpressure that adapts to how fast the receiver can actually consume
+data, rather than a fixed messages-per-minute cap.
+
 ## Not yet in this document
 
 - Reconnect: how a client re-attaches to its existing session, resumes
   a transfer, and how the epoch counter above stays synchronized.
-- File transfer: `file_meta` format, `chunk_ack`, `file_abort`,
-  `file_complete`.
 - Role swap: `role_swap_request`/`role_swap_response`/`role_swap_applied`.
+- Aborting a single transfer vs. ending the whole session.
+- Bundling multiple files into a streamed ZIP.
 
 Each will be appended here as its build step lands.

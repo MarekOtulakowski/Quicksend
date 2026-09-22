@@ -11,7 +11,14 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { deriveEpochKey, deriveFileKey, encryptChunk, decryptChunk, deriveReconnectToken } from "./crypto.js";
+import {
+  deriveEpochKey,
+  deriveFileKey,
+  encryptChunk,
+  decryptChunk,
+  deriveReconnectToken,
+  METADATA_CHUNK_INDEX,
+} from "./crypto.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -114,4 +121,20 @@ test("different epochs and fileIDs yield different keys", async () => {
   const kA = await deriveFileKey(epochKey, fileA);
   const kB = await deriveFileKey(epochKey, fileB);
   assert.notEqual(bytesToHex(kA), bytesToHex(kB));
+});
+
+test("metadata encryption (reserved sentinel index) matches frozen vector", async () => {
+  const v = await loadVectors();
+  const sessionKey = hexToBytes(v.sessionKeyHex);
+  const fileID = hexToBytes(v.fileIDHex);
+  const epochVector = v.epochKeyVectors.find((e) => e.epoch === v.fileKeyVector.epoch);
+  const epochKey = await deriveEpochKey(sessionKey, epochVector.epoch);
+  const fileKey = await deriveFileKey(epochKey, fileID);
+
+  const plaintext = hexToBytes(v.metadataVector.plaintextHex);
+  const ct = await encryptChunk(fileKey, fileID, METADATA_CHUNK_INDEX, true, plaintext);
+  assert.equal(bytesToHex(ct), v.metadataVector.expectedCiphertextHex);
+
+  const opened = await decryptChunk(fileKey, fileID, METADATA_CHUNK_INDEX, true, ct);
+  assert.equal(bytesToHex(opened), v.metadataVector.plaintextHex);
 });

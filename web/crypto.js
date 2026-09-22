@@ -12,6 +12,12 @@ const NONCE_SIZE = 12;
 const FILE_ID_SIZE = 16;
 const TAG_LENGTH_BITS = 128;
 
+/** Reserved chunk index used to encrypt a file's metadata under the
+ * same fileKey, instead of a separate construction — see
+ * cryptoutil.MetadataChunkIndex (Go) and docs/PROTOCOL.md. A BigInt
+ * since 2^64-1 can't be represented exactly as a JS Number. */
+export const METADATA_CHUNK_INDEX = 0xffffffffffffffffn;
+
 const EPOCH_INFO = new TextEncoder().encode("quicksend-epoch-v1");
 const FILE_INFO = new TextEncoder().encode("quicksend-v1");
 const RECONNECT_INFO = new TextEncoder().encode("quicksend-reconnect");

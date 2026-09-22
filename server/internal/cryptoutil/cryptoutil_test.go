@@ -30,6 +30,10 @@ type vectorsFile struct {
 		SessionID        string `json:"sessionId"`
 		ExpectedTokenHex string `json:"expectedTokenHex"`
 	} `json:"reconnectTokenVector"`
+	MetadataVector struct {
+		PlaintextHex          string `json:"plaintextHex"`
+		ExpectedCiphertextHex string `json:"expectedCiphertextHex"`
+	} `json:"metadataVector"`
 }
 
 func loadVectors(t *testing.T) vectorsFile {
@@ -120,6 +124,16 @@ func TestVectorsMatchGoImplementation(t *testing.T) {
 	wantToken := hexBytes(t, v.ReconnectTokenVector.ExpectedTokenHex)
 	if !bytes.Equal(token, wantToken) {
 		t.Errorf("reconnect token = %x, want %x", token, wantToken)
+	}
+
+	metaPlaintext := hexBytes(t, v.MetadataVector.PlaintextHex)
+	metaCT, err := EncryptChunk(fileKey, fileID, MetadataChunkIndex, true, metaPlaintext)
+	if err != nil {
+		t.Fatalf("EncryptChunk(metadata): %v", err)
+	}
+	wantMetaCT := hexBytes(t, v.MetadataVector.ExpectedCiphertextHex)
+	if !bytes.Equal(metaCT, wantMetaCT) {
+		t.Errorf("metadata ciphertext = %x, want %x", metaCT, wantMetaCT)
 	}
 }
 

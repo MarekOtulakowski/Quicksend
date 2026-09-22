@@ -11,18 +11,10 @@ import { renderQR } from "./qr-encode.js";
 import { startScanning } from "./qr-scan.js";
 import * as b64url from "./base64url.js";
 import * as pake from "./pake.js";
+import { renderTransferUI } from "./transfer-ui.js";
+import { toHex, fromHex } from "./hex.js";
 
 const SESSION_KEY_BYTES = 32;
-
-function toHex(bytes) {
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function fromHex(hex) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-  return bytes;
-}
 
 /** Waits for the next message of a given type on socket. Safe to have
  * several of these (and other listeners) on the same socket at once —
@@ -551,6 +543,10 @@ function startJoin(container, sessionId, sessionKey) {
 function renderPaired(container) {
   const text = currentState.role === "host" ? t("statusPairedHost") : t("statusPairedGuest");
   container.appendChild(paragraph(text, "status-paired"));
+
+  const transferRoot = document.createElement("div");
+  container.appendChild(transferRoot);
+  renderTransferUI(transferRoot, getPairedSession());
 }
 
 const ERROR_MESSAGE_KEYS = {

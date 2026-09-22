@@ -54,6 +54,16 @@ export const STRINGS = {
     errCodeMismatch: "Kod się nie zgadza po obu stronach. Spróbujcie ponownie z nowym kodem.",
     errGeneric: "Coś poszło nie tak. Spróbuj ponownie.",
     tryAgain: "Spróbuj ponownie",
+
+    transferSenderHint: "Wybierz pliki do wysłania",
+    transferWaitingForFiles: "Czekam na pliki…",
+    transferReceivingFiles: "Odbieranie plików…",
+    transferSending: "Wysyłanie…",
+    transferSent: "Wysłano",
+    transferSavedToDisk: "Zapisano na dysku",
+    transferDownloaded: "Pobrano",
+    transferError: "Błąd transferu",
+    transferLargeFileWarning: "Duży plik bez wsparcia zapisu na dysk — może zużyć dużo pamięci przeglądarki.",
   },
   en: {
     langGroupLabel: "Language",
@@ -110,6 +120,16 @@ export const STRINGS = {
     errCodeMismatch: "The code didn't match on both sides. Try again with a new code.",
     errGeneric: "Something went wrong. Please try again.",
     tryAgain: "Try again",
+
+    transferSenderHint: "Choose files to send",
+    transferWaitingForFiles: "Waiting for files…",
+    transferReceivingFiles: "Receiving files…",
+    transferSending: "Sending…",
+    transferSent: "Sent",
+    transferSavedToDisk: "Saved to disk",
+    transferDownloaded: "Downloaded",
+    transferError: "Transfer error",
+    transferLargeFileWarning: "Large file without disk-write support — may use a lot of browser memory.",
   },
 };
 

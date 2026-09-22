@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 const (
@@ -30,6 +31,12 @@ const (
 	NonceSize = 12
 	// FileIDSize is the length in bytes of a per-file identifier.
 	FileIDSize = 16
+	// MetadataChunkIndex is a reserved chunk index used to encrypt a
+	// file's metadata (name, size, MIME type) with EncryptChunk/
+	// DecryptChunk under the same fileKey, instead of a separate
+	// construction. No real data chunk ever uses this index (a file
+	// would need over 2^64 chunks, i.e. exabytes at 256 KiB/chunk).
+	MetadataChunkIndex uint64 = math.MaxUint64
 
 	epochInfo     = "quicksend-epoch-v1"
 	fileInfo      = "quicksend-v1"

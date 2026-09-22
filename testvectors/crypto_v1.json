@@ -37,5 +37,10 @@
   "reconnectTokenVector": {
     "sessionId": "test-session-id-0123456789",
     "expectedTokenHex": "65d8c9db3832ceae1b625e37bb35e637aeec1afc5e14fc1108312c8c67fa1600"
+  },
+  "metadataVector": {
+    "_comment": "File metadata is encrypted with EncryptChunk under the reserved MetadataChunkIndex (2^64-1) sentinel, last=true. chunkIndex isn't listed here as a JSON number since 2^64-1 can't round-trip through JS's Number type — both implementations hardcode the sentinel instead of parsing it from JSON.",
+    "plaintextHex": "7b226e616d65223a226361742e706e67222c2273697a65223a31323334352c226d696d65223a22696d6167652f706e67227d",
+    "expectedCiphertextHex": "48f9956bebd9f46c8571dcb196da682f524216380989d50896a4f80d4009ac8c5aca1edf4af6c13e5d65844c4f43546646f9d41423668c060ef51eab0cb06dc4f521"
   }
 }
