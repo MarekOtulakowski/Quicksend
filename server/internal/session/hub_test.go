@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -589,5 +591,219 @@ func TestReconnectRespectsPerIPSessionLimit(t *testing.T) {
 	_, _, err := h.Reconnect(context.Background(), s.ID, RoleHost, token, "1.1.1.1", &fakeConn{})
 	if err != ErrTooManySessions {
 		t.Errorf("err = %v, want ErrTooManySessions", err)
+	}
+}
+
+// recordingConn captures every Send call (binary chunk frames as well
+// as JSON envelopes), unlike fakeConn which panics on non-JSON data —
+// needed here since these tests mix both on the same connection (a
+// relayed chunk frame, then a relay-initiated file_abort envelope).
+type recordingConn struct {
+	mu   sync.Mutex
+	sent []recordedSend
+}
+
+type recordedSend struct {
+	binary bool
+	data   []byte
+}
+
+func (r *recordingConn) Send(_ context.Context, binary bool, data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent = append(r.sent, recordedSend{binary, append([]byte(nil), data...)})
+	return nil
+}
+
+func (r *recordingConn) Close(string) error { return nil }
+
+func (r *recordingConn) binaryFrames() [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out [][]byte
+	for _, m := range r.sent {
+		if m.binary {
+			out = append(out, m.data)
+		}
+	}
+	return out
+}
+
+func (r *recordingConn) envelopes() []proto.Envelope {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []proto.Envelope
+	for _, m := range r.sent {
+		if m.binary {
+			continue
+		}
+		var env proto.Envelope
+		if json.Unmarshal(m.data, &env) == nil {
+			out = append(out, env)
+		}
+	}
+	return out
+}
+
+// fileAbortsReceived filters envelopes() down to file_abort messages
+// only, since CreateSession/attach already put an unrelated
+// session_created (or similar) envelope on these connections before
+// any of these tests' Relay calls happen.
+func (r *recordingConn) fileAbortsReceived() []proto.Envelope {
+	var out []proto.Envelope
+	for _, env := range r.envelopes() {
+		if env.Type == proto.TypeFileAbort {
+			out = append(out, env)
+		}
+	}
+	return out
+}
+
+// buildChunkFrame constructs a binary chunk frame matching
+// transfer.js's wire format (docs/PROTOCOL.md): type byte, last-chunk
+// flag, 16-byte fileId, 8-byte BE chunk index, then ciphertextLen
+// bytes of (here, meaningless — size tracking never reads them)
+// payload.
+func buildChunkFrame(fileID [16]byte, index uint64, isLast bool, ciphertextLen int) []byte {
+	frame := make([]byte, chunkFrameHeaderLen+ciphertextLen)
+	frame[0] = chunkFrameTypeFile
+	if isLast {
+		frame[1] = 1
+	}
+	copy(frame[2:18], fileID[:])
+	binary.BigEndian.PutUint64(frame[18:26], index)
+	return frame
+}
+
+func TestRelayAbortsFileExceedingMaxSize(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxFileSize = 50
+	h, _ := newTestHub(cfg)
+	host := &recordingConn{}
+	guest := &recordingConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	s.attach(RoleGuest, guest, "2.2.2.2", h.now())
+
+	var fileID [16]byte
+	copy(fileID[:], []byte("0123456789abcdef"))
+
+	// 26-byte header + 100 bytes of "ciphertext" = 126 bytes, over the
+	// 50-byte cap in a single frame.
+	frame := buildChunkFrame(fileID, 0, false, 100)
+	if !h.Relay(context.Background(), s, RoleHost, true, frame) {
+		t.Fatal("expected the crossing frame itself to still be delivered")
+	}
+
+	if got := guest.binaryFrames(); len(got) != 1 || len(got[0]) != len(frame) {
+		t.Fatalf("expected the crossing frame relayed exactly once, got %d frames", len(got))
+	}
+
+	for _, conn := range []*recordingConn{host, guest} {
+		envs := conn.fileAbortsReceived()
+		if len(envs) != 1 {
+			t.Fatalf("expected exactly one file_abort to this peer, got %v", envs)
+		}
+		var payload proto.FileAbortPayload
+		if err := json.Unmarshal(envs[0].Payload, &payload); err != nil {
+			t.Fatalf("unmarshal file_abort payload: %v", err)
+		}
+		if payload.Reason != proto.FileAbortReasonSizeLimit {
+			t.Errorf("reason = %q, want %q", payload.Reason, proto.FileAbortReasonSizeLimit)
+		}
+		if payload.FileID != hex.EncodeToString(fileID[:]) {
+			t.Errorf("fileID = %q, want %q", payload.FileID, hex.EncodeToString(fileID[:]))
+		}
+	}
+
+	// A further chunk for the same, already-aborted file must be
+	// dropped, not relayed — an honest client stops on its own after
+	// file_abort, but a slow/misbehaving one shouldn't keep costing
+	// the relay bandwidth for a file it already rejected.
+	h.Relay(context.Background(), s, RoleHost, true, buildChunkFrame(fileID, 1, false, 10))
+	if got := guest.binaryFrames(); len(got) != 1 {
+		t.Errorf("expected no further frames relayed for an already-aborted file, got %d", len(got))
+	}
+}
+
+func TestRelayAllowsFileUnderMaxSize(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxFileSize = 1000
+	h, _ := newTestHub(cfg)
+	host := &recordingConn{}
+	guest := &recordingConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	s.attach(RoleGuest, guest, "2.2.2.2", h.now())
+
+	var fileID [16]byte
+	copy(fileID[:], []byte("0123456789abcdef"))
+
+	for i := 0; i < 3; i++ {
+		isLast := i == 2
+		if !h.Relay(context.Background(), s, RoleHost, true, buildChunkFrame(fileID, uint64(i), isLast, 100)) {
+			t.Fatalf("chunk %d: expected delivery", i)
+		}
+	}
+
+	if got := guest.binaryFrames(); len(got) != 3 {
+		t.Fatalf("expected all 3 chunks relayed, got %d", len(got))
+	}
+	for _, conn := range []*recordingConn{host, guest} {
+		if envs := conn.fileAbortsReceived(); len(envs) != 0 {
+			t.Errorf("expected no file_abort for a file under the limit, got %v", envs)
+		}
+	}
+}
+
+func TestRelayResetsFileSizeCounterAfterLastChunk(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxFileSize = 150
+	h, _ := newTestHub(cfg)
+	host := &recordingConn{}
+	guest := &recordingConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	s.attach(RoleGuest, guest, "2.2.2.2", h.now())
+
+	var file1, file2 [16]byte
+	copy(file1[:], []byte("file1-aaaaaaaaaa"))
+	copy(file2[:], []byte("file2-bbbbbbbbbb"))
+
+	// Each file is 100 bytes (under the 150-byte cap) sent as a single
+	// last chunk. If the byte counter weren't reset after file1's last
+	// chunk, file2 would wrongly appear as 200 bytes cumulative and
+	// get blocked.
+	h.Relay(context.Background(), s, RoleHost, true, buildChunkFrame(file1, 0, true, 74))
+	h.Relay(context.Background(), s, RoleHost, true, buildChunkFrame(file2, 0, true, 74))
+
+	for _, conn := range []*recordingConn{host, guest} {
+		if envs := conn.fileAbortsReceived(); len(envs) != 0 {
+			t.Errorf("expected no file_abort — each file is individually under the limit, got %v", envs)
+		}
+	}
+	if got := guest.binaryFrames(); len(got) != 2 {
+		t.Fatalf("expected both files' chunks relayed, got %d", len(got))
+	}
+}
+
+func TestRelayDoesNotTrackNonChunkBinaryFrames(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxFileSize = 10
+	h, _ := newTestHub(cfg)
+	host := &recordingConn{}
+	guest := &recordingConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	s.attach(RoleGuest, guest, "2.2.2.2", h.now())
+
+	frame := make([]byte, 200)
+	frame[0] = 0x99 // not the recognized chunk-frame type; well over the 10-byte cap
+	if !h.Relay(context.Background(), s, RoleHost, true, frame) {
+		t.Fatal("expected delivery")
+	}
+	if got := guest.binaryFrames(); len(got) != 1 {
+		t.Fatalf("expected the frame relayed once, got %d", len(got))
+	}
+	for _, conn := range []*recordingConn{host, guest} {
+		if envs := conn.fileAbortsReceived(); len(envs) != 0 {
+			t.Errorf("expected no file_abort for an unrecognized frame type, got %v", envs)
+		}
 	}
 }

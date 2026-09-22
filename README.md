@@ -48,16 +48,21 @@ All limits are environment variables with sane defaults:
 | Variable | Default | Meaning |
 |---|---|---|
 | `QUICKSEND_LISTEN_ADDR` | `:8080` | Address the relay binds to |
-| `QUICKSEND_MAX_FILE_SIZE_BYTES` | 10 GiB | Max size of a single file *(see note below — not yet enforced)* |
+| `QUICKSEND_MAX_FILE_SIZE_BYTES` | 10 GiB | Max size of a single file the relay will keep relaying (see below) |
 | `QUICKSEND_MAX_SESSIONS_PER_IP` | 10 | Concurrent sessions allowed per client IP |
 | `QUICKSEND_SESSION_INACTIVITY_TIMEOUT` | 5m | Idle session teardown |
 | `QUICKSEND_RECONNECT_GRACE_PERIOD` | 45s | How long a session survives a dropped connection |
 | `QUICKSEND_PAIRING_CODE_TTL` | 5m | How long a remote pairing code stays valid |
 | `QUICKSEND_MAX_PAIRING_ATTEMPTS` | 5 | Wrong pairing-code guesses allowed per IP before throttling |
 
-> **Known gap:** `QUICKSEND_MAX_FILE_SIZE_BYTES` is parsed and
-> validated but not yet enforced anywhere in the transfer path. Don't
-> rely on it to bound resource usage yet.
+`QUICKSEND_MAX_FILE_SIZE_BYTES` is enforced by counting the bytes of
+whichever file is currently being relayed — using only the chunk
+frame's outer header (its file ID and last-chunk flag), never its
+ciphertext — so the relay can cut off an oversized file without ever
+decrypting or understanding its content. Once a file crosses the
+limit, the relay cancels it for both peers (the same `file_abort`
+mechanism a user's own "Cancel" button uses) and the session otherwise
+carries on normally. See docs/DECISIONS.md.
 
 ## Architecture
 

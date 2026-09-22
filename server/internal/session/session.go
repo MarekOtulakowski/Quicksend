@@ -52,13 +52,29 @@ func (p *peer) connected() bool {
 // Session is a two-party pairing session. The relay never inspects the
 // content of relayed messages; it only tracks which of the two slots is
 // occupied, by whom, and since when, so it can enforce timeouts and
-// route messages between them.
+// route messages between them. currentFile is the one narrow exception
+// (see recordChunkBytes): it reads a chunk frame's outer header —
+// never its ciphertext — to enforce QUICKSEND_MAX_FILE_SIZE_BYTES.
 type Session struct {
 	ID           string
 	CreatedAt    time.Time
 	mu           sync.Mutex
 	lastActivity time.Time
 	peers        [2]*peer
+	currentFile  currentFileState
+}
+
+// currentFileState tracks the size of whichever file is currently
+// being relayed in a session, so a single file can be capped at
+// QUICKSEND_MAX_FILE_SIZE_BYTES. Only one file is ever in flight at a
+// time (see docs/PROTOCOL.md), so one tracker per session suffices
+// regardless of which peer is currently sending (transfer role can
+// swap — see the role swap decision).
+type currentFileState struct {
+	fileID     [16]byte
+	active     bool
+	blocked    bool // already told both peers to stop; further chunks for this fileID are dropped
+	bytesSoFar int64
 }
 
 func newSession(id string, now time.Time) *Session {
@@ -201,4 +217,57 @@ func (s *Session) snapshot(now time.Time) snapshot {
 		}
 	}
 	return snap
+}
+
+// chunkFrameHeaderLen and chunkFrameTypeFile mirror transfer.js's
+// binary chunk-frame format (docs/PROTOCOL.md): byte 0 is the frame
+// type, byte 1's low bit is the last-chunk flag, bytes 2-17 are the
+// 16-byte fileId, bytes 18-25 are the chunk index. recordChunkBytes
+// only ever reads this fixed-size header, never the ciphertext that
+// follows it.
+const (
+	chunkFrameHeaderLen = 26
+	chunkFrameTypeFile  = 0x01
+)
+
+// recordChunkBytes updates the running byte count for whichever file
+// is currently being relayed in this session — using only a chunk
+// frame's outer header (frame type, fileId, last-chunk flag), never
+// its ciphertext — so QUICKSEND_MAX_FILE_SIZE_BYTES can be enforced
+// without the relay ever needing to decrypt or understand file
+// content, size, or name. See docs/DECISIONS.md.
+//
+// It reports the fileId a frame belongs to (zero value if frame isn't
+// a recognized chunk frame, in which case it's never tracked), and:
+//   - drop: true if this frame belongs to a file already over the
+//     limit and must not be relayed further.
+//   - sendAbort: true exactly once, for the frame that just pushed
+//     the running total past maxSize — the caller should still relay
+//     this one frame, then tell both peers to stop.
+func (s *Session) recordChunkBytes(frame []byte, maxSize int64) (fileID [16]byte, drop, sendAbort bool) {
+	if len(frame) < chunkFrameHeaderLen || frame[0] != chunkFrameTypeFile {
+		return fileID, false, false
+	}
+	copy(fileID[:], frame[2:18])
+	isLast := frame[1]&1 == 1
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.currentFile.active || s.currentFile.fileID != fileID {
+		s.currentFile = currentFileState{fileID: fileID, active: true}
+	}
+	if s.currentFile.blocked {
+		return fileID, true, false
+	}
+
+	s.currentFile.bytesSoFar += int64(len(frame))
+	if s.currentFile.bytesSoFar > maxSize {
+		s.currentFile.blocked = true
+		return fileID, false, true
+	}
+	if isLast {
+		s.currentFile = currentFileState{}
+	}
+	return fileID, false, false
 }

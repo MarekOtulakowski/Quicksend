@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -309,12 +310,45 @@ func (h *Hub) checkAndRecordGuessLocked(ip string, now time.Time) bool {
 // package doc comment.
 func (h *Hub) Relay(ctx context.Context, s *Session, role Role, binary bool, data []byte) bool {
 	s.touch(h.now())
+
+	if binary {
+		fileID, drop, sendAbort := s.recordChunkBytes(data, h.cfg.MaxFileSize)
+		if drop {
+			return true
+		}
+		if sendAbort {
+			defer h.abortOversizedFile(ctx, s, fileID)
+		}
+	}
+
 	other := s.connOf(role.other())
 	if other == nil {
 		return false
 	}
 	_ = other.Send(ctx, binary, data)
 	return true
+}
+
+// abortOversizedFile tells both peers to stop a file that just
+// exceeded QUICKSEND_MAX_FILE_SIZE_BYTES, reusing the same file_abort
+// message clients already handle for a user-initiated cancel (see
+// docs/PROTOCOL.md) — the relay is simply the one sending it this
+// time, instead of relaying it from one peer to the other. It's a
+// best-effort notification, like every other control message the hub
+// sends; a peer that's currently disconnected just won't get it (and
+// will find the file gone if it later reconnects and receives more
+// chunks that recordChunkBytes silently drops).
+func (h *Hub) abortOversizedFile(ctx context.Context, s *Session, fileID [16]byte) {
+	payload := proto.FileAbortPayload{
+		FileID: hex.EncodeToString(fileID[:]),
+		Reason: proto.FileAbortReasonSizeLimit,
+	}
+	if host := s.connOf(RoleHost); host != nil {
+		sendEnvelope(ctx, host, proto.TypeFileAbort, payload)
+	}
+	if guest := s.connOf(RoleGuest); guest != nil {
+		sendEnvelope(ctx, guest, proto.TypeFileAbort, payload)
+	}
 }
 
 // EndSession tears the session down immediately by explicit request

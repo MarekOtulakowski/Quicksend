@@ -51,7 +51,10 @@ function parseChunkFrame(buffer) {
  * The receiver can also initiate the cancel itself (its own
  * `abortCurrent`, see attachReceiver below); either way this function
  * sees the same `file_abort` message and stops, only re-sending it
- * itself when *we* were the ones who decided to cancel.
+ * itself when *we* were the ones who decided to cancel. The relay
+ * itself can also send file_abort (reason "size_limit_exceeded") if
+ * this file goes over QUICKSEND_MAX_FILE_SIZE_BYTES — the rejected
+ * error's `.reason` property carries that through when present.
  */
 export async function sendFile(socket, epochKey, file, { onProgress, signal } = {}) {
   const fileId = crypto.getRandomValues(new Uint8Array(16));
@@ -82,7 +85,7 @@ export async function sendFile(socket, epochKey, file, { onProgress, signal } = 
       ackedUpTo = env.payload.ackedUpTo;
       wakeWaiters();
     } else if (env.type === "file_abort" && env.payload.fileId === fileIdHex) {
-      aborted = { remote: true };
+      aborted = { remote: true, reason: env.payload.reason };
       wakeWaiters();
     }
   }
@@ -129,7 +132,9 @@ export async function sendFile(socket, epochKey, file, { onProgress, signal } = 
 
     if (aborted) {
       if (!aborted.remote) sendEnvelope(socket, "file_abort", { fileId: fileIdHex });
-      throw new DOMException("Transfer canceled", "AbortError");
+      const err = new DOMException("Transfer canceled", "AbortError");
+      if (aborted.reason) err.reason = aborted.reason;
+      throw err;
     }
   } finally {
     socket.removeEventListener("message", onMessage);
@@ -148,7 +153,8 @@ export async function sendFile(socket, epochKey, file, { onProgress, signal } = 
  *   onFileStart({fileId, name, size, mime})
  *   onChunk({fileId, index, isLast, plaintext})  — called per decrypted chunk
  *   onFileComplete({fileId})
- *   onAborted({fileId})  — this file was canceled (by either side); discard it
+ *   onAborted({fileId, reason})  — canceled (by either side, or the
+ *     relay for exceeding the size limit — see reason); discard it
  *   onError(err)
  *
  * Returns { detach, abortCurrent }: detach() removes the receiver's
@@ -231,7 +237,7 @@ export function attachReceiver(socket, epochKey, handlers) {
     if (!current || payload.fileId !== current.fileIdHex) return;
     const fileIdHex = current.fileIdHex;
     current = null;
-    handlers.onAborted && handlers.onAborted({ fileId: fileIdHex });
+    handlers.onAborted && handlers.onAborted({ fileId: fileIdHex, reason: payload.reason });
   }
 
   // WebSocket message events fire as frames arrive, regardless of

@@ -16,9 +16,13 @@ type:
 
 - **Text frames** carry JSON control-plane messages (the *envelope*,
   below).
-- **Binary frames** carry raw file-chunk ciphertext (format defined
-  once the transfer step lands). The relay never parses binary frames;
-  it only forwards them to the other peer in the session.
+- **Binary frames** carry a file-chunk frame (see "Chunk frame" under
+  "File transfer" below): a small fixed-size unencrypted header
+  (frame type, fileId, chunk index, last-chunk flag) followed by
+  AES-256-GCM ciphertext. The relay reads only that header — to enforce
+  `QUICKSEND_MAX_FILE_SIZE_BYTES`, see "File transfer" below — and
+  never the ciphertext after it; it otherwise just forwards the frame
+  to the other peer in the session.
 
 ## Envelope
 
@@ -34,13 +38,18 @@ Every text frame is a JSON object:
 
 The relay only parses and acts on a handful of message types:
 `create_session`, `join`, `create_code_session`, `join_by_code`,
-`end_session`, `reconnect`, and `reconnect_token` (below). Every other
-text message — and every binary frame — is relayed byte-for-byte to
-the other peer in the session, unparsed. This is intentional: it's
-what lets pairing (`pake_msg`), transfer metadata (`file_meta`), acks,
-role-swap negotiation, etc. be end-to-end between the two clients
-without the relay needing to understand (or be updated for) their
-formats.
+`end_session`, `reconnect`, and `reconnect_token` (below), plus every
+binary chunk frame's small unencrypted header (to enforce
+`QUICKSEND_MAX_FILE_SIZE_BYTES` — see "File transfer"). Every other
+text message is relayed byte-for-byte to the other peer, unparsed, and
+every binary frame's ciphertext is relayed unparsed regardless. This
+is intentional: it's what lets pairing (`pake_msg`), transfer metadata
+(`file_meta`), acks, role-swap negotiation, etc. be end-to-end between
+the two clients without the relay needing to understand (or be updated
+for) their formats — the one exception, chunk-frame headers, was
+deliberately designed to carry no content, only routing/framing
+information (a random fileId, a position counter, a flag), so reading
+it doesn't compromise that.
 
 A session has exactly two slots, host and guest:
 
@@ -401,14 +410,36 @@ once, pausing further reads/sends until `chunk_ack`s catch up —
 backpressure that adapts to how fast the receiver can actually consume
 data, rather than a fixed messages-per-minute cap.
 
-### `file_abort` (either side → the other, relayed opaquely)
+### Size limit (`QUICKSEND_MAX_FILE_SIZE_BYTES`)
+
+The relay sums the byte length of every chunk frame it relays for
+whichever file is currently in flight in a session (reading only the
+frame's header — see "Relay behavior" above — never its ciphertext),
+reset to zero whenever a frame's last-chunk flag is set (that file is
+done) or a new fileId appears (a different file has started; only one
+is ever in flight at a time). If that running total exceeds
+`QUICKSEND_MAX_FILE_SIZE_BYTES`, the relay:
+
+1. still relays the one frame that crossed the limit (byte-exact
+   enforcement isn't the goal — bounding resource usage is),
+2. sends `file_abort` (`reason: "size_limit_exceeded"`) to *both*
+   peers, and
+3. silently drops any further frames for that fileId, in case a
+   slow or misbehaving client keeps sending after being told to stop.
+
+A frame that isn't a recognized chunk frame (too short, or an
+unexpected frame type byte) is never tracked or blocked — this
+enforcement only ever applies to the one binary frame type the PWA
+actually sends.
+
+### `file_abort` (either side → the other, relayed opaquely — or the relay itself → both sides)
 
 Cancels one file transfer without ending the session — the other side
 keeps its socket, its role, everything, and can send/receive more
 files afterward.
 
 ```json
-{ "type": "file_abort", "payload": { "fileId": "<hex>" } }
+{ "type": "file_abort", "payload": { "fileId": "<hex>", "reason": "<optional>" } }
 ```
 
 Either side can send this for whichever file is currently in flight:
@@ -419,14 +450,28 @@ Either side can send this for whichever file is currently in flight:
 - The **receiver** declining to keep receiving (user clicks cancel
   while receiving) tells the sender via `file_abort` so it stops
   pushing chunks nobody wants.
+- The **relay itself** sends this to *both* peers, with `reason:
+  "size_limit_exceeded"`, if a file crosses
+  `QUICKSEND_MAX_FILE_SIZE_BYTES` — the only case where the relay
+  originates a control message for the two clients' own transfer
+  protocol rather than merely relaying one. It can do this without
+  ever decrypting anything: chunk frames aren't opaque *binary
+  content* to the relay in the way `pake_msg`/`file_meta` payloads are
+  opaque *JSON* — their fixed-size outer header (frame type, fileId,
+  last-chunk flag; never the ciphertext after it) is structural
+  framing the relay already receives, so reading just that header to
+  count bytes per file doesn't compromise "the relay never sees
+  plaintext content, filenames, or metadata." See docs/DECISIONS.md.
 
 Whichever side receives a `file_abort` for the file it's currently
 working on abandons it silently — it does **not** send its own
-`file_abort` back (that would ping-pong forever). A `file_abort` for
+`file_abort` back (that would ping-pong forever, and would be
+meaningless for a relay-originated one anyway). A `file_abort` for
 any other fileId (already completed, or stale) is ignored. Any chunk
 frame that arrives for a file that's just been aborted — a normal race,
 since the other side may not know yet — is also silently dropped
-rather than treated as a protocol error.
+rather than treated as a protocol error; the relay does the same for
+any further chunks of a file it has already aborted.
 
 ## Reconnect
 

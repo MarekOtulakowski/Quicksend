@@ -176,6 +176,28 @@ test("sendFile rejects with AbortError but does NOT re-send file_abort when the 
   assert.equal(socket.sent.length, sentBeforeAbort, "must not echo file_abort back for a remotely-initiated cancel");
 });
 
+test("sendFile carries the relay's size-limit reason through to the rejected error", async () => {
+  const socket = new FakeSocket();
+  const sessionKey = crypto.getRandomValues(new Uint8Array(32));
+  const epochKey = await deriveEpochKey(sessionKey, 0);
+  const bytes = new Uint8Array(randomBytes(300 * 1024));
+  const file = makeFile(bytes);
+
+  const sendPromise = sendFile(socket, epochKey, file, {});
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const chunkFrame = socket.sent.find((d) => typeof d !== "string");
+  const fileIdHex = Array.from(new Uint8Array(chunkFrame.slice(2, 18)))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  // The relay itself can send file_abort with a reason when a file
+  // exceeds QUICKSEND_MAX_FILE_SIZE_BYTES (see server/internal/session).
+  socket.emitMessage(JSON.stringify({ type: "file_abort", payload: { fileId: fileIdHex, reason: "size_limit_exceeded" } }));
+
+  await assert.rejects(sendPromise, (err) => err.name === "AbortError" && err.reason === "size_limit_exceeded");
+});
+
 test("attachReceiver's abortCurrent discards the file, notifies the sender, and ignores late chunks", async () => {
   const socket = new FakeSocket();
   const sessionKey = crypto.getRandomValues(new Uint8Array(32));
@@ -269,6 +291,39 @@ test("attachReceiver discards the file and calls onAborted when the sender cance
   socket.emitMessage(JSON.stringify({ type: "file_abort", payload: { fileId: fileIdHex } }));
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  assert.deepEqual(aborted, { fileId: fileIdHex });
+  assert.deepEqual(aborted, { fileId: fileIdHex, reason: undefined });
   assert.equal(completed, false);
+});
+
+test("attachReceiver passes the relay's size-limit reason through to onAborted", async () => {
+  const socket = new FakeSocket();
+  const sessionKey = crypto.getRandomValues(new Uint8Array(32));
+  const epochKey = await deriveEpochKey(sessionKey, 0);
+
+  const fileId = crypto.getRandomValues(new Uint8Array(16));
+  const fileIdHex = Array.from(fileId).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const fileKey = await deriveFileKey(epochKey, fileId);
+  const toHex = (b) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+  const metaPlaintext = new TextEncoder().encode(JSON.stringify({ name: "a.bin", size: 5, mime: "text/plain" }));
+  const metaCiphertext = await encryptChunk(fileKey, fileId, METADATA_CHUNK_INDEX, true, metaPlaintext);
+
+  let aborted = null;
+
+  attachReceiver(socket, epochKey, {
+    onFileStart: async () => {},
+    onChunk: async () => {},
+    onFileComplete: async () => {},
+    onAborted: (payload) => {
+      aborted = payload;
+    },
+    onError: () => {},
+  });
+
+  socket.emitMessage(JSON.stringify({ type: "file_meta", payload: { fileId: fileIdHex, ciphertext: toHex(metaCiphertext) } }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  socket.emitMessage(JSON.stringify({ type: "file_abort", payload: { fileId: fileIdHex, reason: "size_limit_exceeded" } }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.deepEqual(aborted, { fileId: fileIdHex, reason: "size_limit_exceeded" });
 });

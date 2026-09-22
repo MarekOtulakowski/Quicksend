@@ -667,3 +667,59 @@ permissions — confirming not just that a "copied" status appears, but
 that the clipboard's actual contents match the displayed link/code
 exactly, not just some copy attempt that silently copied the wrong
 string.
+
+## MAX_FILE_SIZE_BYTES enforcement: reading the chunk-frame header, not the ciphertext
+
+**What:** `QUICKSEND_MAX_FILE_SIZE_BYTES` was loaded and validated
+from day one (`server/internal/config`) but never actually enforced —
+flagged as a known gap while writing the README's configuration table,
+and left open through several build steps since. It's now enforced in
+`session.Session.recordChunkBytes`, called from `Hub.Relay` for every
+binary frame: it sums frame lengths per in-flight fileId, and once a
+file's running total exceeds the limit, the relay sends `file_abort`
+(`reason: "size_limit_exceeded"`) to both peers and drops any further
+frames for that file.
+
+**Why this doesn't compromise "the relay never sees plaintext":** the
+chunk frame's outer header — frame type, fileId, chunk index,
+last-chunk flag (see docs/PROTOCOL.md) — was already designed to carry
+no content: fileId is 16 random bytes with no meaning beyond "same
+file, different chunk," the index is just a position counter, and the
+flag reveals nothing about what's being sent. None of it is
+ciphertext, and `recordChunkBytes` never reads past byte 26 of a
+frame. This is a genuinely different case from, say, parsing
+`file_meta`'s payload (which *is* encrypted content the relay must
+never touch) — the header was always metadata the relay receives as
+plain framing, whether or not any Go code happened to look at it.
+Enforcing a real per-file limit this way is strictly better than the
+alternative once considered (a total-bytes-relayed-per-session
+counter): it matches what the config variable actually says
+("max size of a **single file**") instead of a looser proxy for it.
+
+**Why reuse `file_abort` instead of a new message type:** the relay
+telling both peers "stop, this file is too big" is semantically
+identical to a client cancelling — same cleanup on both sides (discard
+partial state, stay paired, ready for the next file), same UI concept
+(a canceled row). Reusing it meant **zero client-side protocol
+changes** were needed for enforcement to work at all; the only client
+change was cosmetic — plumbing a `reason` field through so "File too
+large" can be shown instead of a generic "Canceled" (see
+`FileAbortPayload.Reason` / `attachReceiver`'s and `sendFile`'s
+`onAborted`/rejected-error handling). This is also why `file_abort`'s
+doc comment now says "normally opaque... the one exception": every
+other message in that opaque set is *never* something the relay itself
+originates, only relays.
+
+**Why the crossing frame is still relayed instead of dropped
+immediately:** the goal is bounding relay resource usage per file, not
+byte-exact content policing — relaying one frame past the limit before
+cutting off is a rounding error against limits meant to be measured in
+MB/GB, and simplifies the logic (no need to buffer or inspect the
+frame before deciding).
+
+**Verified against a live server** with
+`QUICKSEND_MAX_FILE_SIZE_BYTES` set low via Playwright: an oversized
+file gets cut off with the right status on both sides, and — the part
+that would have been easy to get wrong — the session keeps working
+normally for a subsequent file under the limit afterward, proving the
+per-file counter actually resets rather than wedging the session.

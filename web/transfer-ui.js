@@ -10,6 +10,14 @@ import { deriveEpochKey } from "./crypto.js";
 import { sendFile, attachReceiver } from "./transfer.js";
 import { createFileSink, BLOB_FALLBACK_WARN_BYTES } from "./file-writer.js";
 
+/** Picks the status text for a canceled transfer: the relay's own
+ * size-limit cancellation (see server/internal/session's
+ * recordChunkBytes) gets a specific message; a cancel from either
+ * side clicking Cancel just says "Canceled". */
+function abortStatusText(reason) {
+  return reason === "size_limit_exceeded" ? t("transferTooLarge") : t("transferCanceled");
+}
+
 function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -117,7 +125,7 @@ function renderSenderTransfer(container, socket, epochKey) {
         row.progressEl.value = 100;
         row.statusEl.textContent = t("transferSent");
       } catch (err) {
-        row.statusEl.textContent = err && err.name === "AbortError" ? t("transferCanceled") : t("transferError");
+        row.statusEl.textContent = err && err.name === "AbortError" ? abortStatusText(err.reason) : t("transferError");
       }
       row.cancelBtn.hidden = true;
     }
@@ -178,14 +186,14 @@ function renderReceiverTransfer(container, socket, epochKey) {
       row.progressEl.value = 100;
       row.statusEl.textContent = row.sink.mode === "fsa" ? t("transferSavedToDisk") : t("transferDownloaded");
     },
-    onAborted: ({ fileId }) => {
+    onAborted: ({ fileId, reason }) => {
       receiving = false;
       status.textContent = t("transferWaitingForFiles");
       const row = rows[fileId];
       if (!row) return;
       row.done = true;
       row.cancelBtn.hidden = true;
-      row.statusEl.textContent = t("transferCanceled");
+      row.statusEl.textContent = abortStatusText(reason);
       row.sink.abort();
     },
     onError: (err) => {

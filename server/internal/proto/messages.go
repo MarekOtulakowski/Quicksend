@@ -63,11 +63,21 @@ type RoleSwapResponsePayload struct {
 // FileAbortPayload cancels one in-progress file transfer without
 // ending the session. Sent by either side — the sender giving up, or
 // the receiver declining to keep receiving — to whichever side didn't
-// initiate the cancel, so both stop for the same file. The relay
-// never parses this; it's opaque like pake_msg above.
+// initiate the cancel, so both stop for the same file. Normally
+// opaque to the relay, like pake_msg above — the one exception is
+// FileAbortReasonSizeLimit, which the relay itself sends (see
+// docs/DECISIONS.md): it can enforce QUICKSEND_MAX_FILE_SIZE_BYTES
+// using only the chunk frame's outer header (fileId, the last-chunk
+// flag), never its ciphertext, so this doesn't require seeing
+// plaintext file content or size.
 type FileAbortPayload struct {
 	FileID string `json:"fileId"`
+	Reason string `json:"reason,omitempty"`
 }
+
+// FileAbortReasonSizeLimit is the only reason the relay itself ever
+// sends (rather than merely relaying); see FileAbortPayload.
+const FileAbortReasonSizeLimit = "size_limit_exceeded"
 
 // SessionCreatedPayload is sent to the peer who called create_session,
 // carrying the session ID the other side needs to join (via QR or, later,
