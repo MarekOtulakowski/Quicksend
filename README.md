@@ -143,6 +143,8 @@ more).
 - Sharing the pairing link/code via the native share sheet or
   clipboard, with a persistent warning that whoever has it can join
   the transfer
+- Sending files via a proper button or by dragging them onto the page
+  from the desktop
 - Saving via the File System Access API — pick a destination folder
   once and every file writes straight into it with no further
   per-file dialogs, falling back to a per-file save prompt or an

@@ -92,10 +92,24 @@ function renderSenderTransfer(container, socket, epochKey) {
   hint.textContent = t("transferSenderHint");
   container.appendChild(hint);
 
+  // A drop zone wrapping the native file input: the input itself picks
+  // up a proper button style via CSS (::file-selector-button) instead
+  // of the browser's small, easy-to-miss default control, and the
+  // whole zone also accepts a drag-and-drop of files from the desktop.
+  const dropZone = document.createElement("div");
+  dropZone.className = "drop-zone";
+
   const input = document.createElement("input");
   input.type = "file";
   input.multiple = true;
-  container.appendChild(input);
+  dropZone.appendChild(input);
+
+  const dropHint = document.createElement("p");
+  dropHint.className = "muted drop-hint";
+  dropHint.textContent = t("dropHint");
+  dropZone.appendChild(dropHint);
+
+  container.appendChild(dropZone);
 
   const list = document.createElement("ul");
   list.className = "file-list";
@@ -103,9 +117,11 @@ function renderSenderTransfer(container, socket, epochKey) {
 
   let sending = false;
 
-  input.addEventListener("change", async () => {
-    const files = Array.from(input.files || []);
-    input.value = "";
+  async function sendFiles(files) {
+    // Matches input.disabled's existing effect of making the file
+    // picker unopenable mid-send: a drop while already sending isn't
+    // queued, just ignored, so batches don't interleave.
+    if (sending || files.length === 0) return;
     input.disabled = true;
     sending = true;
 
@@ -132,6 +148,26 @@ function renderSenderTransfer(container, socket, epochKey) {
 
     sending = false;
     input.disabled = false;
+  }
+
+  input.addEventListener("change", () => {
+    const files = Array.from(input.files || []);
+    input.value = "";
+    sendFiles(files);
+  });
+
+  ["dragenter", "dragover"].forEach((evt) =>
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.add("drop-zone-active");
+    }),
+  );
+  ["dragleave", "dragend", "drop"].forEach((evt) =>
+    dropZone.addEventListener(evt, () => dropZone.classList.remove("drop-zone-active")),
+  );
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    sendFiles(Array.from(e.dataTransfer.files || []));
   });
 
   return { detach: () => {}, isActive: () => sending };

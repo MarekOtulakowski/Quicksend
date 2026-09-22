@@ -72,6 +72,7 @@ export const STRINGS = {
     swapTimedOut: "Brak odpowiedzi. Spróbuj ponownie.",
 
     transferSenderHint: "Wybierz pliki do wysłania",
+    dropHint: "albo przeciągnij i upuść pliki tutaj",
     transferWaitingForFiles: "Czekam na pliki…",
     chooseSaveFolderButton: "Wybierz folder zapisu",
     changeSaveFolderButton: "Zmień folder zapisu",
@@ -160,6 +161,7 @@ export const STRINGS = {
     swapTimedOut: "No response. Try again.",
 
     transferSenderHint: "Choose files to send",
+    dropHint: "or drag and drop files here",
     transferWaitingForFiles: "Waiting for files…",
     chooseSaveFolderButton: "Choose save folder",
     changeSaveFolderButton: "Change save folder",

@@ -900,3 +900,44 @@ by a real origin-private-file-system directory handle, since
 `showDirectoryPicker` itself can't be driven headlessly) and confirmed
 both landed on "disk" as distinct files (`same-name.txt` and
 `same-name (1).txt`), not one silently overwriting the other.
+
+## Sender file picker: styled via `::file-selector-button`, plus drag-and-drop
+
+**What:** the sender's `<input type="file" multiple>` had no styling
+at all — it rendered as the browser's small default control, easy to
+overlook (raised by the user after the secure-context fix, asking
+whether a file-choosing button even existed). It's now wrapped in a
+`.drop-zone` that also accepts a drag-and-drop of files from the
+desktop, sharing the same `sendFiles()` path as the button so both
+routes get identical per-file rows, progress, cancel, and error
+handling.
+
+**Why style the real `<input>` via `::file-selector-button` instead of
+the common hidden-input-plus-styled-label trick:** it keeps the
+element's native semantics and accessibility (keyboard focus,
+screen-reader labeling, right-click "reveal" behavior) fully intact —
+`::file-selector-button` is a standard CSS pseudo-element for exactly
+this button, supported in all current major browsers, so there's no
+need to fake a button and proxy clicks to a hidden input.
+
+**Why drag-and-drop doesn't get its own send path:** `dataTransfer.files`
+on a `drop` event is a `FileList`, the same shape `input.files` is —
+both are normalized to a plain array and handed to the same
+`sendFiles(files)` function, so there's exactly one place that owns
+per-file row creation, the abort controller, and error handling,
+rather than two parallel implementations to keep in sync.
+
+**Why a drop while already sending is silently ignored, not queued:**
+matches the existing behavior of the button itself, which the browser
+makes unclickable (`input.disabled`) during a send — there was already
+an implicit "only one batch in flight at a time" rule; a drop needed
+its own explicit `if (sending) return` to honor the same rule, since
+nothing native disables a `<div>` drop target.
+
+**Verified** with Playwright by dispatching a real `dragenter`/`drop`
+sequence carrying a `DataTransfer` (the standard way to drive HTML5
+drag-and-drop without an actual OS-level drag gesture, which can't be
+scripted) against a live paired session: confirmed the drop zone's
+active-state styling toggles on `dragenter`, the dropped file sends
+and is received successfully, and the ordinary click-to-pick button
+still works immediately afterward in the same session.
