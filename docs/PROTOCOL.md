@@ -151,14 +151,76 @@ All configurable via environment variables (see README):
   after one peer disconnects, waiting for it to reconnect, before the
   other peer is told `session_ended`.
 
+## Cryptography
+
+None of this runs on the relay — it only ever forwards ciphertext it
+can't read. `sessionKey` (32 bytes) is established out-of-band (QR
+fragment or, later, code+PAKE) and never leaves the two paired
+browsers. See docs/DECISIONS.md for the reasoning behind each choice
+below.
+
+### Key derivation
+
+```
+epochKey = HKDF-SHA256(ikm=sessionKey, salt=epoch (4-byte BE uint32), info="quicksend-epoch-v1", len=32)
+fileKey  = HKDF-SHA256(ikm=epochKey,   salt=fileID (16 bytes),         info="quicksend-v1",       len=32)
+```
+
+- `epoch` starts at 0 for a fresh pairing and increments by one on
+  every successful reconnect. Both peers derive it identically without
+  it ever appearing on the wire (protocol for keeping it synchronized
+  across reconnects lands with that build step; until then only epoch
+  0 exists).
+- `fileID` is 16 bytes chosen by the sender, unique per file, sent
+  (encrypted) as part of that file's metadata (`file_meta`, format
+  TBD).
+
+### Chunk encryption (AES-256-GCM)
+
+Each chunk of a file is sealed independently under `fileKey`:
+
+- **Nonce** (12 bytes) = `0x00000000` ‖ chunk index as an 8-byte
+  big-endian integer.
+- **AAD** = `fileID (16 bytes)` ‖ `chunkIndex (8-byte BE)` ‖
+  `lastChunkFlag (1 byte)`.
+- Output = ciphertext ‖ 16-byte GCM tag (this is Web Crypto's default
+  `AES-GCM` output layout, which Go's implementation matches).
+
+A receiver must reject a chunk whose AEAD tag doesn't verify — this
+happens automatically if the chunk was replayed at the wrong index,
+spliced from a different file, or the last-chunk flag doesn't match
+what the sender used.
+
+### Reconnect token
+
+```
+reconnectToken = HMAC-SHA256(key=sessionKey, message="quicksend-reconnect" ‖ sessionId)
+```
+
+Computed once by each peer after pairing and given to the relay as an
+opaque bearer credential (the relay stores and compares it, but can
+never compute or forge it itself since it doesn't have `sessionKey`).
+Presented again to resume the session after a disconnect (exact
+handshake documented once the reconnect build step lands).
+
+### Reference implementations & test vectors
+
+- Go: `server/internal/cryptoutil` (`go test ./server/internal/cryptoutil/...`)
+- JS: `web/crypto.js`, built on the native Web Crypto API
+  (`node --test web/crypto.test.mjs`)
+- Both are checked against the same frozen vectors in
+  `/testvectors/crypto_v1.json`, so a change that breaks agreement
+  between the two implementations fails a test rather than surfacing
+  later as "sometimes doesn't connect."
+
 ## Not yet in this document
 
 - Pairing key exchange: QR fragment format and the code+PAKE flow
   (`pake_msg`).
-- Reconnect: how a client re-attaches to its existing session and
-  resumes a transfer.
-- File transfer: `file_meta`, chunk framing (binary frames), `chunk_ack`,
-  `file_abort`, `file_complete`.
+- Reconnect: how a client re-attaches to its existing session, resumes
+  a transfer, and how the epoch counter above stays synchronized.
+- File transfer: `file_meta` format, `chunk_ack`, `file_abort`,
+  `file_complete`.
 - Role swap: `role_swap_request`/`role_swap_response`/`role_swap_applied`.
 
 Each will be appended here as its build step lands.

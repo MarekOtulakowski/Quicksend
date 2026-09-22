@@ -1,0 +1,41 @@
+{
+  "_comment": "Frozen test vectors for Quicksend's HKDF/AES-256-GCM/HMAC scheme (see docs/DECISIONS.md and docs/PROTOCOL.md). Both server/internal/cryptoutil (Go) and web/crypto.js (Web Crypto) are tested against this file so the two independent implementations are proven to agree byte-for-byte, not just individually self-consistent.",
+  "sessionKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "fileIDHex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "epochKeyVectors": [
+    { "epoch": 0, "expectedEpochKeyHex": "ce6fc7f47cda4a3b52867ca8d8103b65baa4b71c5dbc065b0047f17f45a2a27a" },
+    { "epoch": 1, "expectedEpochKeyHex": "56d8f2e95bb6fe44ede171cca02c2ec48ea185c94efcfa4ab62b264cd25db1e1" }
+  ],
+  "fileKeyVector": {
+    "epoch": 0,
+    "expectedFileKeyHex": "a2ad2b617b974fd4c36e4ba30a57ad9e579d2e9da790682eeabe9f5fb4f9c32a"
+  },
+  "plaintextShortHex": "517569636b73656e64",
+  "chunkVectors": [
+    {
+      "name": "first chunk, not last",
+      "chunkIndex": 0,
+      "last": false,
+      "plaintextHex": "517569636b73656e64",
+      "expectedCiphertextHex": "51c44461235fe7f837105a163ceff443ef6de015adb13af430"
+    },
+    {
+      "name": "later chunk, last",
+      "chunkIndex": 41,
+      "last": true,
+      "plaintextHex": "517569636b73656e64",
+      "expectedCiphertextHex": "0608381958f10ed39b0965feab2c392422b319eef2e56c0846"
+    },
+    {
+      "name": "empty final chunk (exact multiple of chunk size)",
+      "chunkIndex": 0,
+      "last": true,
+      "plaintextHex": "",
+      "expectedCiphertextHex": "c23271492332bd30275d1941f3f3d13d"
+    }
+  ],
+  "reconnectTokenVector": {
+    "sessionId": "test-session-id-0123456789",
+    "expectedTokenHex": "65d8c9db3832ceae1b625e37bb35e637aeec1afc5e14fc1108312c8c67fa1600"
+  }
+}
