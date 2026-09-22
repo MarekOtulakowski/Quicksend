@@ -6,7 +6,9 @@ WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 
+COPY assets.go ./
 COPY server/ server/
+COPY web/ web/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
     -o /out/quicksend ./server/cmd/quicksend
