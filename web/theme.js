@@ -1,5 +1,8 @@
+import { t, onLocaleChange } from "./i18n.js";
+
 const STORAGE_KEY = "quicksend-theme";
 const VALID = ["system", "light", "dark"];
+const LABEL_KEYS = { system: "themeSystem", light: "themeLight", dark: "themeDark" };
 
 function readStored() {
   try {
@@ -22,19 +25,23 @@ export function initThemeToggle(container) {
   let current = readStored();
   apply(current);
 
-  const labels = { system: "System", light: "Jasny", dark: "Ciemny" };
   container.innerHTML = "";
   container.setAttribute("role", "group");
-  container.setAttribute("aria-label", "Motyw");
 
   const buttons = {};
   for (const theme of VALID) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.textContent = labels[theme];
     btn.addEventListener("click", () => setTheme(theme));
     container.appendChild(btn);
     buttons[theme] = btn;
+  }
+
+  function relabel() {
+    container.setAttribute("aria-label", t("themeGroupLabel"));
+    for (const [theme, btn] of Object.entries(buttons)) {
+      btn.textContent = t(LABEL_KEYS[theme]);
+    }
   }
 
   function setTheme(theme) {
@@ -45,10 +52,12 @@ export function initThemeToggle(container) {
     } catch {
       // Preference simply won't persist across reloads; not critical.
     }
-    for (const [t, btn] of Object.entries(buttons)) {
-      btn.setAttribute("aria-pressed", String(t === theme));
+    for (const [th, btn] of Object.entries(buttons)) {
+      btn.setAttribute("aria-pressed", String(th === theme));
     }
   }
 
+  relabel();
   setTheme(current);
+  onLocaleChange(relabel);
 }

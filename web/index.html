@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pl">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -15,8 +15,8 @@
 <link rel="stylesheet" href="styles.css">
 <script>
   try {
-    var t = localStorage.getItem("quicksend-theme");
-    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    var storedTheme = localStorage.getItem("quicksend-theme");
+    if (storedTheme === "light" || storedTheme === "dark") document.documentElement.dataset.theme = storedTheme;
   } catch (e) {}
 </script>
 </head>
@@ -26,10 +26,13 @@
     <img src="icon.svg" alt="" width="28" height="28" class="logo">
     <h1>Quicksend</h1>
   </div>
-  <div id="theme-toggle" class="theme-toggle"></div>
+  <div class="controls">
+    <div id="lang-toggle" class="toggle-group"></div>
+    <div id="theme-toggle" class="toggle-group"></div>
+  </div>
 </header>
 <main>
-  <p class="muted">Relay i logika transferu w budowie.</p>
+  <p class="muted" data-i18n="tagline">Relay and transfer logic under construction.</p>
 </main>
 <script type="module" src="app.js"></script>
 </body>

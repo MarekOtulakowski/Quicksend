@@ -58,8 +58,17 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
   padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--border);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .brand {
@@ -85,7 +94,7 @@ main {
   margin: 0 auto;
 }
 
-.theme-toggle {
+.toggle-group {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
@@ -95,7 +104,7 @@ main {
   padding: 0.25rem;
 }
 
-.theme-toggle button {
+.toggle-group button {
   border: none;
   background: transparent;
   color: var(--fg-muted);
@@ -106,12 +115,12 @@ main {
   cursor: pointer;
 }
 
-.theme-toggle button[aria-pressed="true"] {
+.toggle-group button[aria-pressed="true"] {
   background: var(--accent);
   color: var(--accent-fg);
 }
 
-.theme-toggle button:focus-visible {
+.toggle-group button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
