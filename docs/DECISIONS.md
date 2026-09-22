@@ -723,3 +723,56 @@ file gets cut off with the right status on both sides, and — the part
 that would have been easy to get wrong — the session keeps working
 normally for a subsequent file under the limit afterward, proving the
 per-file counter actually resets rather than wedging the session.
+
+## docker-compose.yml: Caddy specifically, and the relay never gets a published port
+
+**What:** the example production `docker-compose.yml` runs two
+services — the relay (built from the repo's own `Dockerfile`, no
+`ports:` entry) and `caddy:2-alpine` (the only one with published
+ports, 80 and 443) reverse-proxying to the relay over the compose
+file's default internal network. The domain to request a certificate
+for comes from `QUICKSEND_DOMAIN`, read from a gitignored `.env` (a
+committed `.env.example` documents it); the Caddyfile references it
+via Caddy's own `{$VAR}` env-var substitution rather than needing any
+templating step.
+
+**Why Caddy, specifically, for the example:** the brief left the choice
+of reverse proxy open (Caddy, Traefik, and Cloudflare Tunnel are all
+mentioned in the README as valid options) — Caddy was picked for the
+one committed example because it gets automatic TLS via Let's Encrypt
+from a two-line config with no separate ACME client, cert-renewal
+cron job, or manual Certbot setup, and its `reverse_proxy` directive
+handles WebSocket upgrades transparently with no extra configuration
+(unlike some nginx setups, which need explicit `Upgrade`/`Connection`
+header passthrough directives). That combination minimizes the config
+surface a self-hoster has to get right just to stand the relay up
+correctly, which matters more here than for a general-purpose example.
+
+**Why the relay has no published port at all**, not even bound to
+localhost: it doesn't need one — Caddy reaches it over the compose
+network's internal DNS (`quicksend:8080`) regardless of whether the
+host publishes anything. Leaving it unpublished is what makes the
+already-documented `X-Forwarded-For` trust decision (see "Per-IP
+client address trusts X-Forwarded-For/X-Real-IP" above) actually safe
+in this deployment, rather than merely asserted in a comment: there's
+no way to reach the relay directly and spoof that header, short of
+already being inside the Docker host.
+
+**Why `QUICKSEND_DOMAIN` is a required env var** (`${QUICKSEND_DOMAIN:?...}`
+rather than a default): a docker-compose example is something people
+copy and run; a silent fallback to some placeholder domain would let
+someone `docker compose up` against a domain they don't own, which
+would either fail obscurely (no DNS) or, worse, partially succeed in
+confusing ways. Failing loudly with a clear message beats a working
+default here.
+
+**Verified against a real local run**, not just `docker compose
+config`: built and started both containers via `docker compose up
+--build`, confirmed the relay's own healthcheck reports healthy,
+confirmed Caddy auto-provisions a certificate (using its internal CA
+for a non-public `localhost` test domain — Let's Encrypt itself can
+only be exercised against a real public domain, which isn't available
+in this environment) and correctly issues an HTTP→HTTPS redirect, and
+ran a full Playwright pairing-and-transfer test through
+`https://localhost` end-to-end — proving the WebSocket upgrade, not
+just plain HTTP requests, actually survives Caddy's proxying.

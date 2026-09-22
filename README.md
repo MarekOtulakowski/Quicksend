@@ -41,6 +41,25 @@ For real use, put a reverse proxy (Caddy, Traefik, Cloudflare Tunnel)
 in front for TLS — the container itself only speaks plain HTTP and is
 not meant to be exposed directly to the internet.
 
+### Production deployment
+
+[`docker-compose.yml`](docker-compose.yml) runs the relay alongside
+[Caddy](https://caddyserver.com/) as a reverse proxy that terminates
+TLS automatically (via Let's Encrypt) and forwards to the relay over
+Docker's internal network — the relay itself has no port published to
+the host, so it's never reachable except through Caddy. This is also
+what makes `QUICKSEND_MAX_SESSIONS_PER_IP` meaningful in this setup:
+it trusts the `X-Forwarded-For` header Caddy sets, which only means
+anything when the relay can't be reached any other way (see
+[docs/DECISIONS.md](docs/DECISIONS.md)).
+
+```sh
+cp .env.example .env
+# edit .env: set QUICKSEND_DOMAIN to a domain that already points at
+# this host (Caddy needs that to obtain a certificate for it)
+docker compose up -d
+```
+
 ### Configuration
 
 All limits are environment variables with sane defaults:
@@ -101,6 +120,8 @@ more).
 - Saving via the File System Access API, with an in-memory Blob
   fallback for browsers without it
 - Light/dark theme, Polish/English UI
+- `docker-compose.yml` for a production deployment behind Caddy
+  (automatic TLS, relay never directly exposed)
 
 ### Not yet implemented
 
@@ -110,7 +131,6 @@ more).
   separate files)
 - Service Worker streaming as a save fallback (currently File System
   Access API, else an in-memory Blob)
-- `docker-compose.yml` with an example reverse-proxy setup
 
 ## Threat model
 

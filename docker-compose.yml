@@ -1,0 +1,45 @@
+# Example production deployment: Caddy terminates TLS (automatic via
+# Let's Encrypt, using QUICKSEND_DOMAIN) and reverse-proxies to the
+# relay over Docker's internal network. The relay itself has no
+# published port — it's only reachable through Caddy. This matters for
+# more than isolation: QUICKSEND_MAX_SESSIONS_PER_IP trusts the
+# X-Forwarded-For header Caddy sets, which is only safe when the relay
+# can't be reached directly (see docs/DECISIONS.md).
+#
+# Usage:
+#   cp .env.example .env   # then edit QUICKSEND_DOMAIN in .env
+#   docker compose up -d
+#
+# For local/LAN testing without a domain or TLS, use `docker run`
+# directly instead — see the Quick start section in README.md.
+
+services:
+  quicksend:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      QUICKSEND_LISTEN_ADDR: ":8080"
+      # Override any other QUICKSEND_* variable from README.md's
+      # configuration table here, e.g.:
+      # QUICKSEND_MAX_FILE_SIZE_BYTES: "5368709120"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - quicksend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      QUICKSEND_DOMAIN: ${QUICKSEND_DOMAIN:?set QUICKSEND_DOMAIN in .env — see .env.example}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
