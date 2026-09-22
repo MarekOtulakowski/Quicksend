@@ -565,3 +565,57 @@ intercepting the sender's outgoing WebSocket frames in the test and
 holding them un-sent (so `sendFile` on that side, and the receiver
 waiting on it, are both durably and deterministically still "active")
 rather than racing real wall-clock transfer speed.
+
+## Abort transfer: AbortSignal on the sender, an exposed method on the receiver
+
+**What:** either side can cancel one in-progress file transfer without
+ending the session, via `file_abort` (see docs/PROTOCOL.md). The
+sender's `sendFile` (`web/transfer.js`) takes a standard
+[`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)
+— the same convention `fetch` uses — and rejects with a
+`DOMException` named `"AbortError"` when canceled, so callers can
+`if (err.name === "AbortError")` to show "Canceled" instead of "Error".
+The receiver's `attachReceiver` instead returns an `abortCurrent()`
+method directly (there's no equivalent "cancel this fetch" object to
+reuse — a receiver isn't the one holding a controller for an operation
+it initiated), which cancels whichever file is currently arriving.
+
+**Why either side can send `file_abort`, and why the receiver never
+echoes it back:** a sender giving up and a receiver declining are both
+real scenarios (wrong file selected; changed your mind; the incoming
+file turns out to be something you don't want after all), so the
+message needs to work in both directions. Whichever side receives a
+`file_abort` for its current file just abandons it — it must **not**
+also send its own `file_abort` back, or two peers cancelling
+"at each other" would ping-pong the message forever. `sendFile` tracks
+this with a `{ remote: bool }` flag: `remote: true` (received a
+`file_abort`) suppresses re-sending it; `remote: false` (the local
+`AbortSignal` fired) sends it once.
+
+**Why chunk frames for an aborted file are silently dropped, not
+errored:** aborting is inherently racy — the side that didn't initiate
+it doesn't find out until the `file_abort` message actually arrives,
+and whatever the other side already had in flight over the network
+before then still shows up afterward. `attachReceiver`'s "no file
+currently in progress" case used to be a hard error ("received a chunk
+before file_meta"), which was fine when the only way to reach that
+state was a genuine protocol violation; extended to normal operation
+(a stray post-abort chunk lands in exactly the same state), a hard
+error would surface as spurious "transfer error" noise for a
+completely expected race. Same reasoning on the UI side
+(`transfer-ui.js`): each row tracks a `done` flag so a late `onChunk`
+call for an already-aborted/completed file is a silent no-op instead
+of writing to (or crashing on) an already-closed sink.
+
+**Why a swap-mid-transfer-style busy check isn't needed here:**
+aborting doesn't require the other side's permission — unlike role
+swap (which changes what UI the *other* peer needs to show), a cancel
+is a unilateral "stop, I'm done with this" that the other side simply
+has to honor. There's no mutual-consent handshake, no busy/rejection
+path, and no race to guard against beyond the ordinary "message is in
+flight" one already covered above.
+
+**Verified with the same held-frame Playwright technique as role
+swap's busy check** (see the entry above) — a genuinely mid-transfer
+cancel needed the sender's outgoing frames held back deterministically
+rather than racing real localhost throughput, for the same reason.

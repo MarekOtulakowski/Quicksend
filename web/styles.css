@@ -289,3 +289,9 @@ button.primary-button {
   flex: 0 0 auto;
   font-size: 0.8rem;
 }
+
+.file-cancel {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+}

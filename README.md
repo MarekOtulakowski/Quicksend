@@ -88,6 +88,8 @@ more).
   resumed — see docs/DECISIONS.md)
 - Swapping sender/receiver roles mid-session, by mutual consent, without
   re-pairing (refused while a transfer is actively in progress)
+- Cancelling a single in-progress transfer, from either side, without
+  ending the session
 - Saving via the File System Access API, with an in-memory Blob
   fallback for browsers without it
 - Light/dark theme, Polish/English UI
@@ -96,7 +98,6 @@ more).
 
 - Resuming a file transfer that was in flight across a reconnect
   (currently: the whole file is simply resent)
-- Aborting a single transfer without ending the whole session
 - Bundling multiple files into a streamed ZIP (currently saved as
   separate files)
 - Service Worker streaming as a save fallback (currently File System

@@ -72,7 +72,9 @@ export const STRINGS = {
     transferSavedToDisk: "Zapisano na dysku",
     transferDownloaded: "Pobrano",
     transferError: "Błąd transferu",
+    transferCanceled: "Anulowano",
     transferLargeFileWarning: "Duży plik bez wsparcia zapisu na dysk — może zużyć dużo pamięci przeglądarki.",
+    cancelButton: "Anuluj",
   },
   en: {
     langGroupLabel: "Language",
@@ -147,7 +149,9 @@ export const STRINGS = {
     transferSavedToDisk: "Saved to disk",
     transferDownloaded: "Downloaded",
     transferError: "Transfer error",
+    transferCanceled: "Canceled",
     transferLargeFileWarning: "Large file without disk-write support — may use a lot of browser memory.",
+    cancelButton: "Cancel",
   },
 };
 

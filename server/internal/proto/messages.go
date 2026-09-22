@@ -48,6 +48,7 @@ const (
 	TypePakeConfirm      = "pake_confirm"
 	TypeRoleSwapRequest  = "role_swap_request"
 	TypeRoleSwapResponse = "role_swap_response"
+	TypeFileAbort        = "file_abort"
 )
 
 // RoleSwapResponsePayload answers a role_swap_request: Accepted is
@@ -57,6 +58,15 @@ const (
 // this; it's opaque like pake_msg above.
 type RoleSwapResponsePayload struct {
 	Accepted bool `json:"accepted"`
+}
+
+// FileAbortPayload cancels one in-progress file transfer without
+// ending the session. Sent by either side — the sender giving up, or
+// the receiver declining to keep receiving — to whichever side didn't
+// initiate the cancel, so both stop for the same file. The relay
+// never parses this; it's opaque like pake_msg above.
+type FileAbortPayload struct {
+	FileID string `json:"fileId"`
 }
 
 // SessionCreatedPayload is sent to the peer who called create_session,

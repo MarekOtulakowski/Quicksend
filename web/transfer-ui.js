@@ -32,12 +32,19 @@ function createFileRow(list, name, size) {
   const statusEl = document.createElement("span");
   statusEl.className = "file-status muted";
 
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "file-cancel";
+  cancelBtn.textContent = t("cancelButton");
+  cancelBtn.hidden = true;
+
   li.appendChild(nameEl);
   li.appendChild(progressEl);
   li.appendChild(statusEl);
+  li.appendChild(cancelBtn);
   list.appendChild(li);
 
-  return { progressEl, statusEl };
+  return { progressEl, statusEl, cancelBtn };
 }
 
 /**
@@ -97,17 +104,22 @@ function renderSenderTransfer(container, socket, epochKey) {
     for (const file of files) {
       const row = createFileRow(list, file.name, file.size);
       row.statusEl.textContent = t("transferSending");
+      const controller = new AbortController();
+      row.cancelBtn.hidden = false;
+      row.cancelBtn.addEventListener("click", () => controller.abort(), { once: true });
       try {
         await sendFile(socket, epochKey, file, {
+          signal: controller.signal,
           onProgress: ({ sent, total }) => {
             row.progressEl.value = total > 0 ? Math.round((sent / total) * 100) : 100;
           },
         });
         row.progressEl.value = 100;
         row.statusEl.textContent = t("transferSent");
-      } catch {
-        row.statusEl.textContent = t("transferError");
+      } catch (err) {
+        row.statusEl.textContent = err && err.name === "AbortError" ? t("transferCanceled") : t("transferError");
       }
+      row.cancelBtn.hidden = true;
     }
 
     sending = false;
@@ -129,21 +141,29 @@ function renderReceiverTransfer(container, socket, epochKey) {
   const rows = {};
   let receiving = false;
 
-  const detach = attachReceiver(socket, epochKey, {
+  const { detach, abortCurrent } = attachReceiver(socket, epochKey, {
     onFileStart: async ({ fileId, name, size, mime }) => {
       receiving = true;
       status.textContent = t("transferReceivingFiles");
       const row = createFileRow(list, name, size);
       const sink = await createFileSink(name, mime);
-      rows[fileId] = { ...row, sink, received: 0, size };
+      rows[fileId] = { ...row, sink, received: 0, size, done: false };
 
       if (sink.mode === "blob" && size > BLOB_FALLBACK_WARN_BYTES) {
         row.statusEl.textContent = t("transferLargeFileWarning");
       }
+
+      row.cancelBtn.hidden = false;
+      // Only one file is ever in flight, so this button always cancels
+      // "whatever's current" — no need to track which fileId it maps to.
+      row.cancelBtn.addEventListener("click", () => abortCurrent(), { once: true });
     },
     onChunk: async ({ fileId, plaintext }) => {
       const row = rows[fileId];
-      if (!row) return;
+      // row.done guards against a chunk that was already in flight
+      // when this file got aborted a moment ago (see transfer.js) —
+      // writing to an already-closed/aborted sink would throw.
+      if (!row || row.done) return;
       await row.sink.write(plaintext);
       row.received += plaintext.length;
       row.progressEl.value = row.size > 0 ? Math.round((row.received / row.size) * 100) : 100;
@@ -152,9 +172,21 @@ function renderReceiverTransfer(container, socket, epochKey) {
       receiving = false;
       const row = rows[fileId];
       if (!row) return;
+      row.done = true;
+      row.cancelBtn.hidden = true;
       await row.sink.close();
       row.progressEl.value = 100;
       row.statusEl.textContent = row.sink.mode === "fsa" ? t("transferSavedToDisk") : t("transferDownloaded");
+    },
+    onAborted: ({ fileId }) => {
+      receiving = false;
+      status.textContent = t("transferWaitingForFiles");
+      const row = rows[fileId];
+      if (!row) return;
+      row.done = true;
+      row.cancelBtn.hidden = true;
+      row.statusEl.textContent = t("transferCanceled");
+      row.sink.abort();
     },
     onError: (err) => {
       receiving = false;
@@ -163,7 +195,9 @@ function renderReceiverTransfer(container, socket, epochKey) {
       // it errored and discard its partial write rather than leaving
       // the progress bar frozen mid-way with no explanation.
       for (const row of Object.values(rows)) {
-        if (!row.statusEl.textContent) {
+        if (!row.done) {
+          row.done = true;
+          row.cancelBtn.hidden = true;
           row.statusEl.textContent = t("transferError");
           row.sink.abort();
         }

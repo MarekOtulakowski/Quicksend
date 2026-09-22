@@ -4,9 +4,9 @@ This document describes the wire protocol between a Quicksend client
 (the PWA, or an alternative implementation) and the relay, in enough
 detail to implement a compatible client without reading the Go source.
 
-It's written incrementally as features land. This revision adds role
-swap on top of session lifecycle, pairing, file transfer, and
-reconnect.
+It's written incrementally as features land. This revision adds
+aborting a single transfer on top of session lifecycle, pairing, file
+transfer, reconnect, and role swap.
 
 ## Transport
 
@@ -395,6 +395,33 @@ once, pausing further reads/sends until `chunk_ack`s catch up —
 backpressure that adapts to how fast the receiver can actually consume
 data, rather than a fixed messages-per-minute cap.
 
+### `file_abort` (either side → the other, relayed opaquely)
+
+Cancels one file transfer without ending the session — the other side
+keeps its socket, its role, everything, and can send/receive more
+files afterward.
+
+```json
+{ "type": "file_abort", "payload": { "fileId": "<hex>" } }
+```
+
+Either side can send this for whichever file is currently in flight:
+
+- The **sender** cancelling its own send (user clicks cancel while
+  sending) tells the receiver via `file_abort` so it stops waiting for
+  more chunks and discards the partial file.
+- The **receiver** declining to keep receiving (user clicks cancel
+  while receiving) tells the sender via `file_abort` so it stops
+  pushing chunks nobody wants.
+
+Whichever side receives a `file_abort` for the file it's currently
+working on abandons it silently — it does **not** send its own
+`file_abort` back (that would ping-pong forever). A `file_abort` for
+any other fileId (already completed, or stale) is ignored. Any chunk
+frame that arrives for a file that's just been aborted — a normal race,
+since the other side may not know yet — is also silently dropped
+rather than treated as a protocol error.
+
 ## Reconnect
 
 Lets a session survive a dropped WebSocket connection (network blip,
@@ -517,7 +544,6 @@ confusing double round-trip.
 
 ## Not yet in this document
 
-- Aborting a single transfer vs. ending the whole session.
 - Bundling multiple files into a streamed ZIP.
 - Resuming a file transfer that was in flight across a reconnect
   (currently: the whole file is simply resent from scratch).

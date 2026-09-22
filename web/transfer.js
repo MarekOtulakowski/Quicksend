@@ -43,8 +43,17 @@ function parseChunkFrame(buffer) {
  * Sends one file over socket, encrypted under a fresh per-file key
  * derived from epochKey. Resolves once the receiver has acked the
  * final chunk. `onProgress({sent, total})` is called after each chunk.
+ *
+ * `signal` (an AbortSignal) lets the caller cancel mid-transfer — the
+ * receiver is told via `file_abort` and the returned promise rejects
+ * with a DOMException named "AbortError" (the same convention as
+ * `fetch`), distinguishing a user-initiated cancel from a real error.
+ * The receiver can also initiate the cancel itself (its own
+ * `abortCurrent`, see attachReceiver below); either way this function
+ * sees the same `file_abort` message and stops, only re-sending it
+ * itself when *we* were the ones who decided to cancel.
  */
-export async function sendFile(socket, epochKey, file, { onProgress } = {}) {
+export async function sendFile(socket, epochKey, file, { onProgress, signal } = {}) {
   const fileId = crypto.getRandomValues(new Uint8Array(16));
   const fileIdHex = toHex(fileId);
   const fileKey = await deriveFileKey(epochKey, fileId);
@@ -59,14 +68,23 @@ export async function sendFile(socket, epochKey, file, { onProgress } = {}) {
   let ackedUpTo = -1;
   let ackWaiters = [];
   let connectionLost = null;
+  let aborted = null; // { remote: bool } once either side cancels
 
-  function onMessage(event) {
-    const env = parseEnvelope(event);
-    if (!env || env.type !== "chunk_ack" || env.payload.fileId !== fileIdHex) return;
-    ackedUpTo = env.payload.ackedUpTo;
+  function wakeWaiters() {
     const waiters = ackWaiters;
     ackWaiters = [];
     waiters.forEach((resolve) => resolve());
+  }
+  function onMessage(event) {
+    const env = parseEnvelope(event);
+    if (!env) return;
+    if (env.type === "chunk_ack" && env.payload.fileId === fileIdHex) {
+      ackedUpTo = env.payload.ackedUpTo;
+      wakeWaiters();
+    } else if (env.type === "file_abort" && env.payload.fileId === fileIdHex) {
+      aborted = { remote: true };
+      wakeWaiters();
+    }
   }
   // If the connection drops mid-transfer, a reconnect (if any) replaces
   // this socket with a new one rather than resuming it — see
@@ -75,19 +93,24 @@ export async function sendFile(socket, epochKey, file, { onProgress } = {}) {
   // never come.
   function onClose() {
     connectionLost = new Error("connection_lost");
-    const waiters = ackWaiters;
-    ackWaiters = [];
-    waiters.forEach((resolve) => resolve());
+    wakeWaiters();
+  }
+  function onSignalAbort() {
+    aborted = { remote: false };
+    wakeWaiters();
   }
   socket.addEventListener("message", onMessage);
   socket.addEventListener("close", onClose);
+  if (signal) signal.addEventListener("abort", onSignalAbort);
 
   try {
     for (let index = 0; index < totalChunks; index++) {
       while (index - 1 - ackedUpTo >= WINDOW_SIZE) {
         await new Promise((resolve) => ackWaiters.push(resolve));
         if (connectionLost) throw connectionLost;
+        if (aborted) break;
       }
+      if (aborted) break;
 
       const start = index * CHUNK_SIZE;
       const end = Math.min(start + CHUNK_SIZE, file.size);
@@ -99,13 +122,19 @@ export async function sendFile(socket, epochKey, file, { onProgress } = {}) {
       if (onProgress) onProgress({ sent: end, total: file.size });
     }
 
-    while (ackedUpTo < totalChunks - 1) {
+    while (!aborted && ackedUpTo < totalChunks - 1) {
       await new Promise((resolve) => ackWaiters.push(resolve));
       if (connectionLost) throw connectionLost;
+    }
+
+    if (aborted) {
+      if (!aborted.remote) sendEnvelope(socket, "file_abort", { fileId: fileIdHex });
+      throw new DOMException("Transfer canceled", "AbortError");
     }
   } finally {
     socket.removeEventListener("message", onMessage);
     socket.removeEventListener("close", onClose);
+    if (signal) signal.removeEventListener("abort", onSignalAbort);
   }
 }
 
@@ -119,9 +148,13 @@ export async function sendFile(socket, epochKey, file, { onProgress } = {}) {
  *   onFileStart({fileId, name, size, mime})
  *   onChunk({fileId, index, isLast, plaintext})  — called per decrypted chunk
  *   onFileComplete({fileId})
+ *   onAborted({fileId})  — this file was canceled (by either side); discard it
  *   onError(err)
  *
- * Returns a function that detaches the receiver.
+ * Returns { detach, abortCurrent }: detach() removes the receiver's
+ * listeners; abortCurrent() cancels whichever file is currently being
+ * received (a no-op if none), telling the sender via `file_abort` so
+ * it stops too.
  */
 export function attachReceiver(socket, epochKey, handlers) {
   let current = null; // { fileIdHex, fileKey, expectedIndex }
@@ -152,10 +185,12 @@ export function attachReceiver(socket, epochKey, handlers) {
     const frame = parseChunkFrame(buffer);
     if (!frame) return;
 
-    if (!current) {
-      handlers.onError && handlers.onError(new Error("received a file chunk before file_meta"));
-      return;
-    }
+    // No file in progress: either a stray/malformed frame, or (the
+    // common case) a chunk that was already in flight when we or the
+    // sender aborted this file a moment ago. Either way there's
+    // nothing to do with it now — silently dropping it is what makes
+    // abort's race with in-flight chunks harmless.
+    if (!current) return;
     const fileIdHex = toHex(frame.fileId);
     if (fileIdHex !== current.fileIdHex || frame.index !== BigInt(current.expectedIndex)) {
       handlers.onError && handlers.onError(new Error("file chunk out of order or for the wrong file"));
@@ -189,6 +224,16 @@ export function attachReceiver(socket, epochKey, handlers) {
     }
   }
 
+  /** Handles a file_abort from the sender: if it's for the file we're
+   * currently receiving, abandon it. A file_abort for anything else
+   * (already completed, or a stale message) is ignored. */
+  async function handleFileAbort(payload) {
+    if (!current || payload.fileId !== current.fileIdHex) return;
+    const fileIdHex = current.fileIdHex;
+    current = null;
+    handlers.onAborted && handlers.onAborted({ fileId: fileIdHex });
+  }
+
   // WebSocket message events fire as frames arrive, regardless of
   // whether a previous (async) handler has finished — without this
   // chain, a chunk frame could start processing before file_meta's
@@ -206,7 +251,9 @@ export function attachReceiver(socket, epochKey, handlers) {
   function onMessage(event) {
     if (typeof event.data === "string") {
       const env = parseEnvelope(event);
-      if (env && env.type === "file_meta") chainStep(() => handleFileMeta(env.payload));
+      if (!env) return;
+      if (env.type === "file_meta") chainStep(() => handleFileMeta(env.payload));
+      else if (env.type === "file_abort") chainStep(() => handleFileAbort(env.payload));
       return;
     }
     chainStep(() => handleChunkFrame(event.data));
@@ -224,10 +271,24 @@ export function attachReceiver(socket, epochKey, handlers) {
     }
   }
 
+  /** Cancels whatever file is currently being received (no-op if
+   * none): stops locally and tells the sender via file_abort so it
+   * stops sending too, rather than pushing chunks nobody wants. */
+  function abortCurrent() {
+    if (!current) return;
+    const fileIdHex = current.fileIdHex;
+    current = null;
+    sendEnvelope(socket, "file_abort", { fileId: fileIdHex });
+    handlers.onAborted && handlers.onAborted({ fileId: fileIdHex });
+  }
+
   socket.addEventListener("message", onMessage);
   socket.addEventListener("close", onClose);
-  return () => {
-    socket.removeEventListener("message", onMessage);
-    socket.removeEventListener("close", onClose);
+  return {
+    detach: () => {
+      socket.removeEventListener("message", onMessage);
+      socket.removeEventListener("close", onClose);
+    },
+    abortCurrent,
   };
 }
