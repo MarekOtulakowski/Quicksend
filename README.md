@@ -86,6 +86,8 @@ more).
 - Reconnecting a dropped connection without re-pairing (session-level;
   a file that was mid-transfer at the moment of the drop is not
   resumed — see docs/DECISIONS.md)
+- Swapping sender/receiver roles mid-session, by mutual consent, without
+  re-pairing (refused while a transfer is actively in progress)
 - Saving via the File System Access API, with an in-memory Blob
   fallback for browsers without it
 - Light/dark theme, Polish/English UI
@@ -94,7 +96,6 @@ more).
 
 - Resuming a file transfer that was in flight across a reconnect
   (currently: the whole file is simply resent)
-- Swapping sender/receiver roles mid-session
 - Aborting a single transfer without ending the whole session
 - Bundling multiple files into a streamed ZIP (currently saved as
   separate files)

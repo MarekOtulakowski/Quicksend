@@ -72,10 +72,17 @@ async function runPakeExchange(socket, code, pakeRole) {
   return keyBytes;
 }
 
+// How long to wait for a role_swap_response before giving up on a
+// swap request and re-enabling the button — protects against a peer
+// that's mid-reconnect or otherwise unresponsive leaving the button
+// disabled forever.
+const ROLE_SWAP_TIMEOUT_MS = 8000;
+
 let currentState = { screen: "role-select" };
 let activeSocket = null;
 let activeStopScan = null;
-let activeTransferDetach = null;
+let activeTransferHandle = null;
+let swapAwaitingResponse = false;
 
 function buildPairingURL(sessionId, sessionKey) {
   const url = new URL(location.href);
@@ -128,12 +135,13 @@ function cleanupActive() {
  * itself) and before leaving the paired screen entirely — otherwise a
  * receiver's listener from a torn-down render stays attached to a
  * socket that outlives it (e.g. a reconnect that only affected the
- * *other* peer leaves this socket untouched) and keeps trying to
- * decrypt new traffic under a stale epoch key. */
+ * *other* peer leaves this socket untouched, or a role swap doesn't
+ * touch the socket at all) and keeps trying to decrypt new traffic
+ * under a stale epoch key or in the wrong direction. */
 function detachActiveTransfer() {
-  if (activeTransferDetach) {
-    activeTransferDetach();
-    activeTransferDetach = null;
+  if (activeTransferHandle) {
+    activeTransferHandle.detach();
+    activeTransferHandle = null;
   }
 }
 
@@ -167,10 +175,12 @@ export function initPairing(container) {
   render(container);
 }
 
-/** Returns the active paired session for later build steps (transfer,
- * role swap) to use, or null if not currently paired. epoch advances
- * by one on every successful reconnect (either peer) — see
- * transfer-ui.js's renderTransferUI. */
+/** Returns the active paired session for transfer-ui.js to use, or
+ * null if not currently paired. epoch advances by one on every
+ * successful reconnect (either peer). transferRole ("sender" or
+ * "receiver") starts out matching pairing role (host = receiver,
+ * guest = sender) but can be flipped independently by a role swap —
+ * see requestRoleSwap/wirePairedSocket and docs/DECISIONS.md. */
 export function getPairedSession() {
   if (currentState.screen !== "paired") return null;
   return {
@@ -179,6 +189,7 @@ export function getPairedSession() {
     sessionKey: currentState.sessionKey,
     role: currentState.role,
     epoch: currentState.epoch,
+    transferRole: currentState.transferRole,
   };
 }
 
@@ -568,6 +579,8 @@ function startJoin(container, sessionId, sessionKey) {
 }
 
 let reconnectStatusEl = null;
+let swapStatusEl = null;
+let swapButtonEl = null;
 
 function showReconnectStatus(text) {
   if (!reconnectStatusEl) return;
@@ -575,11 +588,21 @@ function showReconnectStatus(text) {
   reconnectStatusEl.hidden = !text;
 }
 
+function showSwapStatus(text) {
+  if (!swapStatusEl) return;
+  swapStatusEl.textContent = text || "";
+  swapStatusEl.hidden = !text;
+}
+
 function renderPaired(container) {
-  // Re-rendering (e.g. after a reconnect or a peer_reconnected
-  // notification) must detach the previous transfer UI's socket
-  // listener first — see detachActiveTransfer.
+  // Re-rendering (e.g. after a reconnect, a peer_reconnected
+  // notification, or a role swap) must detach the previous transfer
+  // UI's socket listener first — see detachActiveTransfer. Any swap
+  // negotiation in flight before this render is now stale (the state
+  // it was tracking just changed underneath it), so drop it too
+  // rather than leave the button permanently disabled.
   detachActiveTransfer();
+  swapAwaitingResponse = false;
 
   const text = currentState.role === "host" ? t("statusPairedHost") : t("statusPairedGuest");
   container.appendChild(paragraph(text, "status-paired"));
@@ -588,11 +611,53 @@ function renderPaired(container) {
   reconnectStatusEl.hidden = true;
   container.appendChild(reconnectStatusEl);
 
+  swapButtonEl = button(t("swapRolesButton"), () => requestRoleSwap(container));
+  container.appendChild(swapButtonEl);
+  swapStatusEl = paragraph("", "muted");
+  swapStatusEl.hidden = true;
+  container.appendChild(swapStatusEl);
+
   const transferRoot = document.createElement("div");
   container.appendChild(transferRoot);
-  renderTransferUI(transferRoot, getPairedSession()).then((detach) => {
-    activeTransferDetach = detach;
+  renderTransferUI(transferRoot, getPairedSession()).then((handle) => {
+    activeTransferHandle = handle;
   });
+}
+
+/** Flips this client's transferRole (sender<->receiver) and
+ * re-renders. Used both when we initiate a swap (after the other side
+ * accepts) and when we're on the receiving end of one (after we
+ * accept it ourselves) — see wirePairedSocket. */
+function flipTransferRole(container) {
+  currentState = {
+    ...currentState,
+    transferRole: currentState.transferRole === "sender" ? "receiver" : "sender",
+  };
+  render(container);
+}
+
+/** Asks the other peer to swap sender/receiver roles. Refuses locally
+ * if a transfer is currently active on this side (swapping mid-file
+ * would corrupt it — see docs/DECISIONS.md); the other side applies
+ * the same check before accepting. */
+function requestRoleSwap(container) {
+  if (activeTransferHandle && activeTransferHandle.isActive()) {
+    showSwapStatus(t("swapBusyLocal"));
+    return;
+  }
+  if (swapAwaitingResponse) return;
+
+  swapAwaitingResponse = true;
+  if (swapButtonEl) swapButtonEl.disabled = true;
+  showSwapStatus(t("swapRequesting"));
+  sendEnvelope(activeSocket, "role_swap_request", null);
+
+  setTimeout(() => {
+    if (!swapAwaitingResponse) return; // already resolved (accepted/rejected/re-rendered)
+    swapAwaitingResponse = false;
+    if (swapButtonEl) swapButtonEl.disabled = false;
+    showSwapStatus(t("swapTimedOut"));
+  }, ROLE_SWAP_TIMEOUT_MS);
 }
 
 /** Finishes the pairing flow common to all four pairing paths (QR
@@ -602,7 +667,14 @@ function renderPaired(container) {
  * relay's session ID (from session_created for QR, or from paired's
  * payload for code+PAKE — see proto.PairedPayload). */
 function finalizePaired(container, socket, sessionId, sessionKey, role) {
-  currentState = { screen: "paired", sessionId, sessionKey, role, epoch: 0 };
+  currentState = {
+    screen: "paired",
+    sessionId,
+    sessionKey,
+    role,
+    epoch: 0,
+    transferRole: role === "host" ? "receiver" : "sender",
+  };
   deriveReconnectToken(sessionKey, sessionId).then((token) => {
     currentState = { ...currentState, reconnectToken: token };
     sendEnvelope(socket, "reconnect_token", { tokenHex: toHex(token) });
@@ -612,9 +684,9 @@ function finalizePaired(container, socket, sessionId, sessionKey, role) {
 }
 
 /** Attaches the listeners that keep a paired session alive across a
- * dropped connection: session_ended ends things for good, peer_reconnected
- * bumps the local epoch (the other side reconnected, we didn't), and an
- * unexpected close of our own socket triggers attemptReconnect. */
+ * dropped connection (session_ended, peer_reconnected, close ->
+ * attemptReconnect) and that handle the other side's role-swap
+ * requests/responses. */
 function wirePairedSocket(container, socket) {
   socket.addEventListener("message", (event) => {
     const env = parseEnvelope(event);
@@ -624,6 +696,23 @@ function wirePairedSocket(container, socket) {
     } else if (env.type === "peer_reconnected") {
       currentState = { ...currentState, epoch: currentState.epoch + 1 };
       render(container);
+    } else if (env.type === "role_swap_request") {
+      // Reject if we're mid-transfer (would corrupt it), or if we
+      // ourselves already have a swap request in flight (a near-
+      // simultaneous mutual request — reject both rather than risk a
+      // double-flip; either side can just click again).
+      const busy = (activeTransferHandle && activeTransferHandle.isActive()) || swapAwaitingResponse;
+      sendEnvelope(socket, "role_swap_response", { accepted: !busy });
+      if (!busy) flipTransferRole(container);
+    } else if (env.type === "role_swap_response") {
+      if (!swapAwaitingResponse) return; // already timed out, or state moved on
+      swapAwaitingResponse = false;
+      if (env.payload && env.payload.accepted) {
+        flipTransferRole(container);
+      } else {
+        showSwapStatus(t("swapRejected"));
+        if (swapButtonEl) swapButtonEl.disabled = false;
+      }
     }
   });
   socket.addEventListener("close", () => {

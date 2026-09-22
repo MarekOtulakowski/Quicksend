@@ -44,9 +44,20 @@ const (
 // documentation/discoverability and any Go-side test that needs to
 // construct one — the relay itself never switches on these.
 const (
-	TypePakeMsg     = "pake_msg"
-	TypePakeConfirm = "pake_confirm"
+	TypePakeMsg          = "pake_msg"
+	TypePakeConfirm      = "pake_confirm"
+	TypeRoleSwapRequest  = "role_swap_request"
+	TypeRoleSwapResponse = "role_swap_response"
 )
+
+// RoleSwapResponsePayload answers a role_swap_request: Accepted is
+// false if the responding peer currently has a transfer in progress
+// (mid-transfer role changes aren't supported — see docs/DECISIONS.md)
+// or already has a swap of its own in flight. The relay never parses
+// this; it's opaque like pake_msg above.
+type RoleSwapResponsePayload struct {
+	Accepted bool `json:"accepted"`
+}
 
 // SessionCreatedPayload is sent to the peer who called create_session,
 // carrying the session ID the other side needs to join (via QR or, later,

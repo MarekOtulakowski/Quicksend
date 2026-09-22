@@ -4,9 +4,9 @@ This document describes the wire protocol between a Quicksend client
 (the PWA, or an alternative implementation) and the relay, in enough
 detail to implement a compatible client without reading the Go source.
 
-It's written incrementally as features land; a section for role swap
-will be added once that build step is implemented. This revision adds
-reconnect on top of session lifecycle, pairing, and file transfer.
+It's written incrementally as features land. This revision adds role
+swap on top of session lifecycle, pairing, file transfer, and
+reconnect.
 
 ## Transport
 
@@ -464,9 +464,59 @@ their respective message (`reconnected` there, `peer_reconnected`
 here) for the same event, without the epoch number itself ever
 crossing the wire.
 
+## Role swap
+
+Lets the two paired peers flip which one is currently sending and
+which is receiving, without ending the session or re-pairing. This is
+purely a client-side concept — the relay's `host`/`guest` slots never
+change, and neither does any cryptographic key material (a file's key
+is derived from `epochKey` and a sender-chosen `fileID`, regardless of
+which peer is doing the sending at the time, so no new key derivation
+is needed for this feature).
+
+Both messages below are relayed opaquely between the two clients, like
+`pake_msg` — the relay never parses or acts on them.
+
+### `role_swap_request` (either client → the other)
+
+No payload. Sent when a user clicks "swap roles."
+
+### `role_swap_response` (the other client → the requester)
+
+```json
+{ "type": "role_swap_response", "payload": { "accepted": true } }
+```
+
+The responding client sends `accepted: false` if it currently has a
+transfer in progress (swapping mid-file isn't supported — a receiver
+can't suddenly become a sender partway through decrypting a file the
+other side is still sending) or if it already has a swap request of
+its own in flight (see below). Otherwise it accepts and flips its own
+transfer role immediately, before or as it sends the response.
+
+The requester only flips its own transfer role upon *receiving*
+`accepted: true` — never optimistically beforehand. A client also
+refuses to even send `role_swap_request` if it itself currently has a
+transfer in progress, which is the common case: whichever peer would
+need to click "swap" while a transfer is running is, by construction,
+one of that transfer's two active participants (there's no way for
+a transfer to be running without both sides being "busy" for its
+duration), so this local check alone covers most cases; the responder
+still re-checks its own busy state independently to close the narrow
+race where a transfer starts in the moment between the request being
+sent and received.
+
+**Simultaneous requests:** if both peers click "swap" at nearly the
+same moment, each one's own outstanding request makes it consider
+itself "busy" (via the same-swap-in-flight check above) when the
+other's request arrives, so both get rejected — no swap happens, and
+either side can just click again. This trades a rare, harmless no-op
+for avoiding a scenario where both sides accept each other's request
+and each flips twice, landing back where they started but through a
+confusing double round-trip.
+
 ## Not yet in this document
 
-- Role swap: `role_swap_request`/`role_swap_response`/`role_swap_applied`.
 - Aborting a single transfer vs. ending the whole session.
 - Bundling multiple files into a streamed ZIP.
 - Resuming a file transfer that was in flight across a reconnect

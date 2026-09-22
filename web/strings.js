@@ -58,6 +58,12 @@ export const STRINGS = {
     tryAgain: "Spróbuj ponownie",
     reconnecting: "Połączenie przerwane, próba wznowienia…",
 
+    swapRolesButton: "Zamień się rolami",
+    swapRequesting: "Czekam na zgodę drugiej strony…",
+    swapRejected: "Druga strona odrzuciła zamianę (trwa transfer). Spróbuj ponownie za chwilę.",
+    swapBusyLocal: "Zaczekaj, aż bieżący transfer się zakończy.",
+    swapTimedOut: "Brak odpowiedzi. Spróbuj ponownie.",
+
     transferSenderHint: "Wybierz pliki do wysłania",
     transferWaitingForFiles: "Czekam na pliki…",
     transferReceivingFiles: "Odbieranie plików…",
@@ -126,6 +132,12 @@ export const STRINGS = {
     errGeneric: "Something went wrong. Please try again.",
     tryAgain: "Try again",
     reconnecting: "Connection lost, trying to reconnect…",
+
+    swapRolesButton: "Swap roles",
+    swapRequesting: "Waiting for the other side to agree…",
+    swapRejected: "The other side declined (a transfer is in progress). Try again shortly.",
+    swapBusyLocal: "Wait for the current transfer to finish first.",
+    swapTimedOut: "No response. Try again.",
 
     transferSenderHint: "Choose files to send",
     transferWaitingForFiles: "Waiting for files…",

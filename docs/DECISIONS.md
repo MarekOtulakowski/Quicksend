@@ -356,10 +356,14 @@ always assign host to the "Receive" click and guest to "Send").
 
 **Why:** simplest possible mapping with zero extra coordination
 needed — the two roles are already established before pairing even
-finishes, so there's nothing left to negotiate. Role swap (a later
-build step) is what lets the two sides flip which one is currently
-sending without re-pairing; until then, whoever chose to receive is
-the receiver for the life of the session.
+finishes, so there's nothing left to negotiate. Role swap (see the
+entry below) is what lets the two sides flip which one is currently
+sending without re-pairing.
+
+**Status:** superseded by role swap — see "Role swap: client-side only,
+mutual-consent, opaque to the relay" below. This mapping is now only
+the *initial* transfer role, not a fixed one for the session's
+lifetime.
 
 ## Metadata is encrypted like a chunk, at a reserved sentinel index
 
@@ -492,3 +496,72 @@ times, 2 seconds apart, before giving up and showing a "connection
 lost" error — comfortably inside the relay's default 45s
 `QUICKSEND_RECONNECT_GRACE_PERIOD` without the client needing to know
 the server's exact configured value.
+
+## Role swap: client-side only, mutual-consent, opaque to the relay
+
+**What:** either paired peer can ask to flip which one is currently
+sending and which is receiving, via `role_swap_request`/
+`role_swap_response` (see docs/PROTOCOL.md). The relay never
+participates — no Go code changes were needed at all beyond adding the
+two message-type constants for documentation, since the existing
+"relay only parses a small allowlist, everything else is opaque"
+architecture already covered this by construction. No new crypto is
+needed either: `fileKey` is derived from `epochKey` and a
+sender-chosen `fileID` regardless of which peer is sending at a given
+moment, so swapping roles doesn't touch key derivation at all.
+
+**Why mutual consent, not unilateral:** a swap changes what the *other*
+peer's UI needs to do (show a file picker vs. an incoming-file list),
+so both sides need to agree before either one commits — a peer can't
+unilaterally decide it's now the sender if the other peer is still
+mid-way through actually sending it a file. Rejecting is silent and
+cheap (a boolean check), so requiring consent costs nothing when both
+sides are idle, which is the common case.
+
+**Why swaps are refused mid-transfer:** allowing a swap while a file is
+actively being sent/received would mean a receiver becoming a sender
+partway through decrypting an in-progress file (or vice versa) — a
+state transfer.js was never designed to handle mid-stream, and
+supporting it would require pausing and resuming a `sendFile`/
+`attachReceiver` pair with the transfer role flipped underneath them.
+Refusing until idle is a one-line check with no such complexity, and
+matches how reconnect already treats an in-flight transfer as
+something to fail cleanly and restart rather than surgically resume.
+
+**Two-message design (not three):** the "not yet in this document"
+placeholder written before this build step imagined three messages
+(`role_swap_request`/`_response`/`_applied`), but a third confirmation
+adds no real synchronization value here — there's no shared,
+relay-side state that depends on transfer role, so each peer can
+safely flip the instant it has enough information to do so: the
+responder flips right as it accepts (it already knows its own answer),
+and the requester flips upon receiving that acceptance. Two messages is
+the whole protocol.
+
+**Simultaneous-request handling:** each client also treats "I have my
+own request outstanding" as a busy reason for incoming requests. Found
+necessary while testing: without it, two peers clicking "swap" within
+the same round-trip window would both see the other as idle, both
+accept, and both flip *twice* (once for their own outgoing request's
+acceptance, once for the incoming request they auto-accepted) —
+correctness-neutral in the sense that two flips cancel out, but
+confusing and pointless. Rejecting both requests in that case is
+simpler than trying to deterministically pick a winner.
+
+**A genuinely "busy" scenario is hard to hit with only two peers:** by
+construction, a transfer running between exactly two peers means
+*both* are active for its duration (one sending, one receiving) — so
+the common path is the *requester's own* local busy check firing, not
+the responder's. The responder's independent busy check only matters
+for a narrow race (a transfer starts in the moment between the request
+being sent and received). This made it hard to test reliably: an
+initial ad-hoc Playwright run using a real multi-megabyte file to
+create a "mid-transfer" window found that localhost throughput could
+finish the whole transfer faster than two separate Playwright
+round-trips could even issue the next command, so the swap request
+always landed after the transfer had *already* completed — not
+actually testing the busy path at all. Verified properly by
+intercepting the sender's outgoing WebSocket frames in the test and
+holding them un-sent (so `sendFile` on that side, and the receiver
+waiting on it, are both durably and deterministically still "active")
+rather than racing real wall-clock transfer speed.

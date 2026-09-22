@@ -1,8 +1,9 @@
 // Renders the post-pairing screen: a file picker + per-file progress
 // for the sender, an incoming-file list for the receiver. Built on
 // transfer.js (encryption/framing/flow-control) and file-writer.js
-// (saving). Pairing "host" is always the file receiver and "guest"
-// the sender for this initial session — see docs/DECISIONS.md.
+// (saving). Which side sends and which receives starts out following
+// pairing role (host = receiver, guest = sender) but can be flipped
+// independently via role swap — see pairing.js and docs/DECISIONS.md.
 
 import { t } from "./i18n.js";
 import { deriveEpochKey } from "./crypto.js";
@@ -40,13 +41,18 @@ function createFileRow(list, name, size) {
 }
 
 /**
- * Renders the transfer UI into container for the current epoch, and
- * returns a cleanup function the caller must invoke before rendering
- * over it again (e.g. on reconnect) or leaving the paired screen —
- * otherwise the receiver's socket listener from the previous render
- * outlives it (the socket itself isn't torn down on a reconnect that
- * only affects the *other* peer) and keeps trying to decrypt new
- * traffic with a now-stale epoch key.
+ * Renders the transfer UI into container for the current epoch and
+ * transfer role, and returns { detach, isActive }:
+ *   - detach() must be called before rendering over this UI again
+ *     (e.g. on reconnect or role swap) or leaving the paired screen —
+ *     otherwise the receiver's socket listener from the previous
+ *     render outlives it (the socket itself isn't torn down by a
+ *     reconnect that only affects the *other* peer, or by a role
+ *     swap at all) and keeps trying to decrypt new traffic with a
+ *     now-stale epoch key or in the wrong direction.
+ *   - isActive() reports whether a send/receive is currently in
+ *     progress, so pairing.js can refuse a role swap mid-transfer
+ *     instead of corrupting it.
  */
 export async function renderTransferUI(container, session) {
   container.innerHTML = "";
@@ -60,11 +66,10 @@ export async function renderTransferUI(container, session) {
   // not resumed; the user resends the file.
   const epochKey = await deriveEpochKey(session.sessionKey, session.epoch || 0);
 
-  if (session.role === "host") {
+  if (session.transferRole === "receiver") {
     return renderReceiverTransfer(container, session.socket, epochKey);
   }
-  renderSenderTransfer(container, session.socket, epochKey);
-  return () => {};
+  return renderSenderTransfer(container, session.socket, epochKey);
 }
 
 function renderSenderTransfer(container, socket, epochKey) {
@@ -81,10 +86,13 @@ function renderSenderTransfer(container, socket, epochKey) {
   list.className = "file-list";
   container.appendChild(list);
 
+  let sending = false;
+
   input.addEventListener("change", async () => {
     const files = Array.from(input.files || []);
     input.value = "";
     input.disabled = true;
+    sending = true;
 
     for (const file of files) {
       const row = createFileRow(list, file.name, file.size);
@@ -102,8 +110,11 @@ function renderSenderTransfer(container, socket, epochKey) {
       }
     }
 
+    sending = false;
     input.disabled = false;
   });
+
+  return { detach: () => {}, isActive: () => sending };
 }
 
 function renderReceiverTransfer(container, socket, epochKey) {
@@ -116,9 +127,11 @@ function renderReceiverTransfer(container, socket, epochKey) {
   container.appendChild(list);
 
   const rows = {};
+  let receiving = false;
 
-  return attachReceiver(socket, epochKey, {
+  const detach = attachReceiver(socket, epochKey, {
     onFileStart: async ({ fileId, name, size, mime }) => {
+      receiving = true;
       status.textContent = t("transferReceivingFiles");
       const row = createFileRow(list, name, size);
       const sink = await createFileSink(name, mime);
@@ -136,6 +149,7 @@ function renderReceiverTransfer(container, socket, epochKey) {
       row.progressEl.value = row.size > 0 ? Math.round((row.received / row.size) * 100) : 100;
     },
     onFileComplete: async ({ fileId }) => {
+      receiving = false;
       const row = rows[fileId];
       if (!row) return;
       await row.sink.close();
@@ -143,6 +157,7 @@ function renderReceiverTransfer(container, socket, epochKey) {
       row.statusEl.textContent = row.sink.mode === "fsa" ? t("transferSavedToDisk") : t("transferDownloaded");
     },
     onError: (err) => {
+      receiving = false;
       status.textContent = t("transferError");
       // A connection drop abandons whatever file was in flight; mark
       // it errored and discard its partial write rather than leaving
@@ -157,4 +172,6 @@ function renderReceiverTransfer(container, socket, epochKey) {
       console.error("transfer error:", err);
     },
   });
+
+  return { detach, isActive: () => receiving };
 }
