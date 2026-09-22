@@ -21,7 +21,7 @@
 
 services:
   quicksend:
-    build: .
+    image: marekotulakowski/quicksend:latest
     restart: unless-stopped
     expose:
       - "8080"
