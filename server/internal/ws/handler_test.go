@@ -175,6 +175,83 @@ func TestInvalidFirstMessageReturnsError(t *testing.T) {
 	}
 }
 
+func TestReconnectEndToEnd(t *testing.T) {
+	srv, _ := testServer(t)
+	url := wsURL(srv.URL)
+
+	host := dial(t, url)
+	send(t, host, proto.TypeCreateSession, nil)
+	created := readEnvelope(t, host)
+	var createdPayload proto.SessionCreatedPayload
+	json.Unmarshal(created.Payload, &createdPayload)
+
+	guest := dial(t, url)
+	send(t, guest, proto.TypeJoin, proto.JoinPayload{SessionID: createdPayload.SessionID})
+	readEnvelope(t, host)  // paired
+	readEnvelope(t, guest) // paired
+
+	// Both sides register their reconnect token right after pairing,
+	// as pairing.js does.
+	send(t, host, proto.TypeReconnectToken, proto.ReconnectTokenPayload{TokenHex: "aa"})
+	send(t, guest, proto.TypeReconnectToken, proto.ReconnectTokenPayload{TokenHex: "bb"})
+
+	// Host drops. Guest is told, but the session survives.
+	host.Close(websocket.StatusNormalClosure, "simulated drop")
+	if env := readEnvelope(t, guest); env.Type != proto.TypePeerDisconnected {
+		t.Fatalf("guest got %s, want peer_disconnected", env.Type)
+	}
+
+	// Host reconnects with its registered token.
+	newHost := dial(t, url)
+	send(t, newHost, proto.TypeReconnect, proto.ReconnectPayload{
+		SessionID: createdPayload.SessionID,
+		Role:      proto.RoleHostWire,
+		TokenHex:  "aa",
+	})
+	if env := readEnvelope(t, newHost); env.Type != proto.TypeReconnected {
+		t.Fatalf("reconnecting host got %s, want reconnected", env.Type)
+	}
+	if env := readEnvelope(t, guest); env.Type != proto.TypePeerReconnected {
+		t.Fatalf("guest got %s, want peer_reconnected", env.Type)
+	}
+
+	// The relay now routes through the new connection.
+	send(t, newHost, "pake_msg", map[string]string{"blob": "post-reconnect"})
+	relayed := readEnvelope(t, guest)
+	if relayed.Type != "pake_msg" {
+		t.Fatalf("guest got %s after reconnect, want pake_msg relayed opaquely", relayed.Type)
+	}
+}
+
+func TestReconnectWrongTokenReturnsError(t *testing.T) {
+	srv, _ := testServer(t)
+	url := wsURL(srv.URL)
+
+	host := dial(t, url)
+	send(t, host, proto.TypeCreateSession, nil)
+	created := readEnvelope(t, host)
+	var createdPayload proto.SessionCreatedPayload
+	json.Unmarshal(created.Payload, &createdPayload)
+	send(t, host, proto.TypeReconnectToken, proto.ReconnectTokenPayload{TokenHex: "aa"})
+	host.Close(websocket.StatusNormalClosure, "simulated drop")
+
+	c := dial(t, url)
+	send(t, c, proto.TypeReconnect, proto.ReconnectPayload{
+		SessionID: createdPayload.SessionID,
+		Role:      proto.RoleHostWire,
+		TokenHex:  "bb",
+	})
+	env := readEnvelope(t, c)
+	if env.Type != proto.TypeError {
+		t.Fatalf("got %s, want error", env.Type)
+	}
+	var payload proto.ErrorPayload
+	json.Unmarshal(env.Payload, &payload)
+	if payload.Code != proto.ErrCodeInvalidReconnectToken {
+		t.Errorf("code = %s, want %s", payload.Code, proto.ErrCodeInvalidReconnectToken)
+	}
+}
+
 func TestPeerDisconnectNotifiesOtherSide(t *testing.T) {
 	srv, _ := testServer(t)
 	url := wsURL(srv.URL)

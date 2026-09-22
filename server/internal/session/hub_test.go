@@ -455,3 +455,139 @@ func TestJoinByCodeGuessBudgetResetsAfterWindow(t *testing.T) {
 		t.Errorf("after window reset, err = %v, want ErrInvalidCode (budget should have reset, not still blocked)", err)
 	}
 }
+
+func TestReconnectResumesSessionAndNotifiesOtherPeer(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	host := &fakeConn{}
+	guest := &fakeConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	h.JoinSession(context.Background(), s.ID, "2.2.2.2", guest)
+
+	token := []byte("host-reconnect-token")
+	h.RegisterReconnectToken(s, RoleHost, token)
+
+	h.HandleDisconnect(context.Background(), s, RoleHost)
+
+	newHostConn := &fakeConn{}
+	rs, role, err := h.Reconnect(context.Background(), s.ID, RoleHost, token, "3.3.3.3", newHostConn)
+	if err != nil {
+		t.Fatalf("Reconnect error = %v", err)
+	}
+	if rs != s || role != RoleHost {
+		t.Fatalf("Reconnect returned (%v, %v), want (%v, RoleHost)", rs, role, s)
+	}
+
+	if got := newHostConn.types(); len(got) != 1 || got[0] != proto.TypeReconnected {
+		t.Errorf("reconnecting conn received %v, want [reconnected]", got)
+	}
+	last := guest.types()
+	if len(last) == 0 || last[len(last)-1] != proto.TypePeerReconnected {
+		t.Errorf("guest messages = %v, want last to be peer_reconnected", last)
+	}
+
+	// The relay should now route through the new connection, not the
+	// stale one that dropped.
+	h.Relay(context.Background(), s, RoleGuest, false, []byte(`{"type":"pake_msg"}`))
+	if len(newHostConn.types()) != 2 {
+		t.Errorf("expected relay to reach the new host connection")
+	}
+	if got := len(host.types()); got != 2 {
+		t.Errorf("the old, dropped host connection should not receive anything further, got %d messages", got)
+	}
+}
+
+func TestReconnectRejectsWrongToken(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	host := &fakeConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	h.RegisterReconnectToken(s, RoleHost, []byte("correct-token"))
+	h.HandleDisconnect(context.Background(), s, RoleHost)
+
+	_, _, err := h.Reconnect(context.Background(), s.ID, RoleHost, []byte("wrong-token"), "1.1.1.1", &fakeConn{})
+	if err != ErrInvalidReconnectToken {
+		t.Errorf("err = %v, want ErrInvalidReconnectToken", err)
+	}
+}
+
+func TestReconnectRejectsUnknownSession(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	_, _, err := h.Reconnect(context.Background(), "does-not-exist", RoleHost, []byte("token"), "1.1.1.1", &fakeConn{})
+	if err != ErrInvalidReconnectToken {
+		t.Errorf("err = %v, want ErrInvalidReconnectToken", err)
+	}
+}
+
+func TestReconnectRejectsWhenStillConnected(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	host := &fakeConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	h.RegisterReconnectToken(s, RoleHost, []byte("token"))
+
+	// Host never disconnected; a reconnect attempt for its slot must
+	// not be able to hijack the still-live connection.
+	_, _, err := h.Reconnect(context.Background(), s.ID, RoleHost, []byte("token"), "9.9.9.9", &fakeConn{})
+	if err != ErrInvalidReconnectToken {
+		t.Errorf("err = %v, want ErrInvalidReconnectToken", err)
+	}
+}
+
+func TestReconnectWithoutRegisteredTokenFails(t *testing.T) {
+	h, _ := newTestHub(testConfig())
+	host := &fakeConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	h.HandleDisconnect(context.Background(), s, RoleHost)
+
+	// Never called RegisterReconnectToken: nothing should ever match.
+	_, _, err := h.Reconnect(context.Background(), s.ID, RoleHost, []byte(""), "1.1.1.1", &fakeConn{})
+	if err != ErrInvalidReconnectToken {
+		t.Errorf("err = %v, want ErrInvalidReconnectToken", err)
+	}
+}
+
+func TestReconnectReleasesGraceAndSurvivesReap(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReconnectGracePeriod = 30 * time.Second
+	cfg.SessionInactivityTimeout = time.Hour
+	h, now := newTestHub(cfg)
+	host := &fakeConn{}
+	guest := &fakeConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	h.JoinSession(context.Background(), s.ID, "2.2.2.2", guest)
+
+	token := []byte("host-token")
+	h.RegisterReconnectToken(s, RoleHost, token)
+	h.HandleDisconnect(context.Background(), s, RoleHost)
+
+	*now = now.Add(10 * time.Second)
+	if _, _, err := h.Reconnect(context.Background(), s.ID, RoleHost, token, "3.3.3.3", &fakeConn{}); err != nil {
+		t.Fatalf("Reconnect error = %v", err)
+	}
+
+	// Well past the original grace period: since the host reconnected,
+	// the reaper must not tear the session down on that basis anymore.
+	*now = now.Add(time.Minute)
+	h.ReapOnce()
+	if guest.isClosed() {
+		t.Error("guest should not be closed: host successfully reconnected before the grace period expired")
+	}
+}
+
+func TestReconnectRespectsPerIPSessionLimit(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxSessionsPerIP = 1
+	h, _ := newTestHub(cfg)
+	host := &fakeConn{}
+	s, _, _ := h.CreateSession(context.Background(), "1.1.1.1", host)
+	token := []byte("token")
+	h.RegisterReconnectToken(s, RoleHost, token)
+	h.HandleDisconnect(context.Background(), s, RoleHost)
+
+	// The disconnect released 1.1.1.1's slot; occupy it with something
+	// else so the reconnect attempt from the same IP is over budget.
+	h.CreateSession(context.Background(), "1.1.1.1", &fakeConn{})
+
+	_, _, err := h.Reconnect(context.Background(), s.ID, RoleHost, token, "1.1.1.1", &fakeConn{})
+	if err != ErrTooManySessions {
+		t.Errorf("err = %v, want ErrTooManySessions", err)
+	}
+}

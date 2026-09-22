@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"crypto/hmac"
 	"sync"
 	"time"
 )
@@ -41,6 +42,7 @@ type peer struct {
 	conn           Conn
 	ip             string
 	disconnectedAt time.Time // zero value means "connected"
+	reconnectToken []byte    // set once, right after pairing; see setReconnectToken
 }
 
 func (p *peer) connected() bool {
@@ -123,6 +125,42 @@ func (s *Session) markDisconnected(role Role, now time.Time) (other Conn, ip str
 		other = op.conn
 	}
 	return other, ip
+}
+
+// setReconnectToken records the bearer token role's peer must present
+// to resume this session after a future disconnect. A no-op if role's
+// slot isn't currently occupied (shouldn't happen: clients register
+// their token over the same connection right after pairing).
+func (s *Session) setReconnectToken(role Role, token []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.peers[role]; p != nil {
+		p.reconnectToken = token
+	}
+}
+
+// reattach resumes role's peer slot with a new connection after a
+// drop, provided role was previously attached, is currently
+// disconnected (not already resumed by someone else), and token
+// matches the one registered via setReconnectToken. It preserves the
+// existing peer struct (and its reconnectToken) rather than replacing
+// it, unlike attach, so the token survives across multiple reconnects
+// of the same peer.
+func (s *Session) reattach(role Role, token []byte, conn Conn, ip string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.peers[role]
+	if p == nil || p.connected() {
+		return false
+	}
+	if len(p.reconnectToken) == 0 || !hmac.Equal(p.reconnectToken, token) {
+		return false
+	}
+	p.conn = conn
+	p.ip = ip
+	p.disconnectedAt = time.Time{}
+	s.lastActivity = now
+	return true
 }
 
 // snapshot describes a session's current state for reaper decisions.

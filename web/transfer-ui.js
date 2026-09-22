@@ -39,17 +39,32 @@ function createFileRow(list, name, size) {
   return { progressEl, statusEl };
 }
 
+/**
+ * Renders the transfer UI into container for the current epoch, and
+ * returns a cleanup function the caller must invoke before rendering
+ * over it again (e.g. on reconnect) or leaving the paired screen —
+ * otherwise the receiver's socket listener from the previous render
+ * outlives it (the socket itself isn't torn down on a reconnect that
+ * only affects the *other* peer) and keeps trying to decrypt new
+ * traffic with a now-stale epoch key.
+ */
 export async function renderTransferUI(container, session) {
   container.innerHTML = "";
   container.className = "transfer";
 
-  const epochKey = await deriveEpochKey(session.sessionKey, 0);
+  // epoch advances by one on every successful reconnect (either side),
+  // so files sent after a reconnect are encrypted under a fresh key —
+  // see cryptoutil.DeriveEpochKey / docs/DECISIONS.md. Re-deriving it
+  // here means a reconnect must re-render this UI (see pairing.js),
+  // which also means an in-flight transfer at the time of the drop is
+  // not resumed; the user resends the file.
+  const epochKey = await deriveEpochKey(session.sessionKey, session.epoch || 0);
 
   if (session.role === "host") {
-    renderReceiverTransfer(container, session.socket, epochKey);
-  } else {
-    renderSenderTransfer(container, session.socket, epochKey);
+    return renderReceiverTransfer(container, session.socket, epochKey);
   }
+  renderSenderTransfer(container, session.socket, epochKey);
+  return () => {};
 }
 
 function renderSenderTransfer(container, socket, epochKey) {
@@ -102,7 +117,7 @@ function renderReceiverTransfer(container, socket, epochKey) {
 
   const rows = {};
 
-  attachReceiver(socket, epochKey, {
+  return attachReceiver(socket, epochKey, {
     onFileStart: async ({ fileId, name, size, mime }) => {
       status.textContent = t("transferReceivingFiles");
       const row = createFileRow(list, name, size);
@@ -129,6 +144,15 @@ function renderReceiverTransfer(container, socket, epochKey) {
     },
     onError: (err) => {
       status.textContent = t("transferError");
+      // A connection drop abandons whatever file was in flight; mark
+      // it errored and discard its partial write rather than leaving
+      // the progress bar frozen mid-way with no explanation.
+      for (const row of Object.values(rows)) {
+        if (!row.statusEl.textContent) {
+          row.statusEl.textContent = t("transferError");
+          row.sink.abort();
+        }
+      }
       // eslint-disable-next-line no-console
       console.error("transfer error:", err);
     },

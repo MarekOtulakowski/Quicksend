@@ -58,6 +58,7 @@ export async function sendFile(socket, epochKey, file, { onProgress } = {}) {
   const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
   let ackedUpTo = -1;
   let ackWaiters = [];
+  let connectionLost = null;
 
   function onMessage(event) {
     const env = parseEnvelope(event);
@@ -67,12 +68,25 @@ export async function sendFile(socket, epochKey, file, { onProgress } = {}) {
     ackWaiters = [];
     waiters.forEach((resolve) => resolve());
   }
+  // If the connection drops mid-transfer, a reconnect (if any) replaces
+  // this socket with a new one rather than resuming it — see
+  // docs/DECISIONS.md — so an in-flight send can never be acked from
+  // here on. Fail fast instead of hanging forever on an ack that will
+  // never come.
+  function onClose() {
+    connectionLost = new Error("connection_lost");
+    const waiters = ackWaiters;
+    ackWaiters = [];
+    waiters.forEach((resolve) => resolve());
+  }
   socket.addEventListener("message", onMessage);
+  socket.addEventListener("close", onClose);
 
   try {
     for (let index = 0; index < totalChunks; index++) {
       while (index - 1 - ackedUpTo >= WINDOW_SIZE) {
         await new Promise((resolve) => ackWaiters.push(resolve));
+        if (connectionLost) throw connectionLost;
       }
 
       const start = index * CHUNK_SIZE;
@@ -87,9 +101,11 @@ export async function sendFile(socket, epochKey, file, { onProgress } = {}) {
 
     while (ackedUpTo < totalChunks - 1) {
       await new Promise((resolve) => ackWaiters.push(resolve));
+      if (connectionLost) throw connectionLost;
     }
   } finally {
     socket.removeEventListener("message", onMessage);
+    socket.removeEventListener("close", onClose);
   }
 }
 
@@ -196,6 +212,22 @@ export function attachReceiver(socket, epochKey, handlers) {
     chainStep(() => handleChunkFrame(event.data));
   }
 
+  // A dropped connection mid-transfer abandons whatever file is
+  // currently in flight (a reconnect, if any, starts fresh over a new
+  // socket rather than resuming this one — see docs/DECISIONS.md), so
+  // surface it as an error instead of leaving the receiver stuck
+  // waiting for chunks that will never arrive.
+  function onClose() {
+    if (current) {
+      current = null;
+      handlers.onError && handlers.onError(new Error("connection_lost"));
+    }
+  }
+
   socket.addEventListener("message", onMessage);
-  return () => socket.removeEventListener("message", onMessage);
+  socket.addEventListener("close", onClose);
+  return () => {
+    socket.removeEventListener("message", onMessage);
+    socket.removeEventListener("close", onClose);
+  };
 }

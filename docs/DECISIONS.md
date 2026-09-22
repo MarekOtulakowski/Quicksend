@@ -129,12 +129,11 @@ scheme already depends on for `fileKey` itself.
 *root* `sessionKey`, not a rotated epoch key, because it must remain
 valid across the very reconnect event that advances the epoch counter.
 
-**Status:** the derivation functions
-(`cryptoutil.DeriveEpochKey`/`web/crypto.js`'s `deriveEpochKey`) are
-implemented and cross-verified against `web/crypto.js` now; the
-*trigger* — incrementing the epoch counter as part of a successful
-reconnect handshake, kept synchronized on both sides — lands with the
-reconnect build step. Until then, only epoch 0 is actually used.
+**Status:** implemented. The reconnect build step wired up the
+*trigger*: the reconnecting peer bumps its epoch on receiving
+`reconnected`, the other peer bumps its on receiving
+`peer_reconnected` — see docs/PROTOCOL.md's "Reconnect" section and the
+"Reconnect: session-level resume, not transfer-level" entry below.
 
 ## AES-256-GCM chunk framing: nonce and AAD construction
 
@@ -152,11 +151,15 @@ reconnect build step. Until then, only epoch 0 is actually used.
 `fileID` HKDF salt), a nonce only needs to be unique per chunk index
 *within* that file — a plain counter is sufficient and lets both sides
 compute the nonce deterministically from data they already have,
-with no extra field on the wire. Resending an unacked chunk after a
-reconnect reuses the same (key, nonce, plaintext) triple, which is
-safe (it's the *same* plaintext being re-encrypted, not a different
-one) as long as retransmission always re-encrypts identical bytes.
-Binding `chunkIndex` and the last-chunk flag into the AAD means a
+with no extra field on the wire. Resending an unacked chunk within the
+same connection reuses the same (key, nonce, plaintext) triple, which
+is safe (it's the *same* plaintext being re-encrypted, not a different
+one) as long as retransmission always re-encrypts identical bytes. (A
+session-level reconnect, by contrast, doesn't resend under the old
+key at all — it moves to a new epoch key and the sender starts the
+file over with a fresh fileId; see "Reconnect: session-level resume,
+not transfer-level" below.) Binding `chunkIndex` and the last-chunk
+flag into the AAD means a
 receiver's AEAD tag check fails if a chunk is replayed at the wrong
 position, spliced from a different file, or the stream is truncated
 and the attacker tries to pass off an earlier chunk as the final one —
@@ -412,3 +415,80 @@ File System Access currently fall back to buffering in memory (with a
 size warning) instead of a disk-backed streamed write. Both are
 reasonable v1 behavior, not silently dropped — flagged here and to the
 user rather than assumed away.
+
+## Reconnect: session-level resume, not transfer-level
+
+**What:** a dropped WebSocket connection can resume the same session
+(same `sessionKey`, same relay-side session object) without re-pairing,
+via a bearer token registered right after pairing
+(`cryptoutil.DeriveReconnectToken` / `reconnect_token` /
+`reconnect` — see docs/PROTOCOL.md's "Reconnect" section). What it
+*doesn't* do: resume a file transfer that was mid-flight at the moment
+of the drop. `sendFile`/`attachReceiver` (`web/transfer.js`) both treat
+the underlying socket closing as fatal to whatever transfer is
+currently running — the sender's promise rejects instead of hanging on
+acks that will never arrive, and the receiver discards the partial
+file and reports an error — rather than trying to pick a chunk stream
+back up on a new connection.
+
+**Why:** true byte-level resume needs both sides to agree, after the
+fact, on exactly which chunk to continue from (the sender's last-sent
+vs. the receiver's last-durably-written index can disagree if the drop
+happened between "chunk delivered" and "chunk_ack sent" — see the
+`chunk_ack`-after-sink-write decision below), which is a meaningfully
+bigger protocol (a resume handshake, per-file position tracking that
+survives the connection, idempotent re-delivery) than "the session
+still works, send the file again." Session-level resume already
+delivers the more common case (the pairing survives a network blip
+instead of forcing the user to re-scan a QR code or exchange a new
+code), and re-sending a file after a drop is a minor inconvenience,
+not a correctness or security problem. Full transfer resume is left
+for a later pass if it turns out to matter in practice.
+
+**How it works:** each peer computes `reconnectToken =
+HMAC-SHA256(sessionKey, "quicksend-reconnect" ‖ sessionId)` once, right
+after pairing, and registers it with the relay over the same
+connection (`reconnect_token`) — the relay stores it opaquely (it's an
+HMAC output derived from a key the relay never has, so it can't compute
+or forge one itself) against that peer's slot. To resume, a client
+opens a new connection and sends `reconnect` with its `sessionId`,
+`role`, and that same token; the relay accepts only if the slot is
+currently disconnected (not hijackable while still live) and the token
+matches byte-for-byte (`crypto/hmac.Equal`, constant-time). On success
+the reconnecting peer gets `reconnected` and the other peer gets
+`peer_reconnected` — both bump their local epoch counter on their
+respective message, which is how `epoch` (see the key-derivation
+decision above) stays synchronized without ever crossing the wire.
+
+**A code+PAKE client needs its `sessionId` for this**, which
+`create_code_session`/`join_by_code` deliberately never exposed before
+(only the human-facing pairing code was). Rather than plumb it through
+a separate message just for the code flow, `paired`'s payload now
+carries `sessionId` for *every* pairing path — harmless redundancy for
+QR clients (which already know it from `session_created`), and the
+only way a code+PAKE client learns it.
+
+**Client-side re-render on reconnect:** rather than trying to hot-swap
+a live socket reference inside an already-rendered transfer UI,
+`pairing.js` just re-renders the whole post-pairing screen (fresh
+epoch key, fresh socket reference) on both `reconnected` (self) and
+`peer_reconnected` (other side). This is what makes the "resend after
+a drop" UX simple: the screen comes back looking exactly like a fresh
+paired session. The one thing this requires discipline about: the
+*previous* render's `attachReceiver` listener is attached directly to
+the socket object, which outlives a `peer_reconnected` re-render (only
+the *other* peer's connection changed, not this one) — so
+`renderTransferUI` returns a detach function, and `pairing.js` calls it
+before every re-render. Missing this was caught immediately by an
+ad-hoc Playwright run: without it, the stale listener kept trying to
+decrypt new file traffic under the old epoch key and threw
+`OperationError` on every `file_meta` after a reconnect (harmless here
+only because the *new* listener also processed the same message
+correctly, but a real leak that would accumulate one listener per
+reconnect and log confusing errors forever).
+
+**Retry budget:** the client retries opening a new connection up to 6
+times, 2 seconds apart, before giving up and showing a "connection
+lost" error — comfortably inside the relay's default 45s
+`QUICKSEND_RECONNECT_GRACE_PERIOD` without the client needing to know
+the server's exact configured value.

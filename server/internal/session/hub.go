@@ -32,6 +32,10 @@ var (
 	// ErrTooManyAttempts means ip has made too many wrong join_by_code
 	// guesses recently and is temporarily blocked from trying more.
 	ErrTooManyAttempts = errors.New("too many wrong pairing code attempts")
+	// ErrInvalidReconnectToken means a reconnect attempt's sessionId/role
+	// combination doesn't exist, isn't currently disconnected, or its
+	// token doesn't match the one registered at pairing time.
+	ErrInvalidReconnectToken = errors.New("invalid reconnect token, or nothing to reconnect to")
 )
 
 // codeEntry maps a short human-readable pairing code to the session
@@ -213,9 +217,55 @@ func (h *Hub) attachGuest(ctx context.Context, s *Session, ip string, conn Conn)
 	h.ipCounts[ip]++
 	h.mu.Unlock()
 
-	sendEnvelope(ctx, hostConn, proto.TypePaired, nil)
-	sendEnvelope(ctx, conn, proto.TypePaired, nil)
+	paired := proto.PairedPayload{SessionID: s.ID}
+	sendEnvelope(ctx, hostConn, proto.TypePaired, paired)
+	sendEnvelope(ctx, conn, proto.TypePaired, paired)
 	return s, RoleGuest, nil
+}
+
+// RegisterReconnectToken records the bearer token role's peer on s
+// must present to resume this session after a future disconnect. It's
+// called once by each peer right over the connection they just paired
+// on; the relay stores the token opaquely (it's an HMAC output it
+// can't compute or forge itself — see cryptoutil.DeriveReconnectToken)
+// and never relays it to the other peer.
+func (h *Hub) RegisterReconnectToken(s *Session, role Role, token []byte) {
+	s.setReconnectToken(role, token)
+}
+
+// Reconnect attaches ip's new connection to role's slot in the session
+// identified by sessionID, resuming it after a dropped connection,
+// provided token matches the one registered for that role at pairing
+// time. On success it notifies the other peer (if connected) with
+// peer_reconnected, so both sides can advance their local epoch
+// counter in lockstep (see cryptoutil.DeriveEpochKey) — the relay
+// itself never tracks or sees the epoch number.
+func (h *Hub) Reconnect(ctx context.Context, sessionID string, role Role, token []byte, ip string, conn Conn) (*Session, Role, error) {
+	h.mu.Lock()
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		h.mu.Unlock()
+		return nil, 0, ErrInvalidReconnectToken
+	}
+	if h.ipCounts[ip] >= h.cfg.MaxSessionsPerIP {
+		h.mu.Unlock()
+		return nil, 0, ErrTooManySessions
+	}
+	h.mu.Unlock()
+
+	if !s.reattach(role, token, conn, ip, h.now()) {
+		return nil, 0, ErrInvalidReconnectToken
+	}
+
+	h.mu.Lock()
+	h.ipCounts[ip]++
+	h.mu.Unlock()
+
+	if other := s.connOf(role.other()); other != nil {
+		sendEnvelope(ctx, other, proto.TypePeerReconnected, nil)
+	}
+	sendEnvelope(ctx, conn, proto.TypeReconnected, nil)
+	return s, role, nil
 }
 
 // newUniqueCodeLocked generates a 6-digit code not currently in use.

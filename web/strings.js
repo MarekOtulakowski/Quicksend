@@ -52,8 +52,11 @@ export const STRINGS = {
     errInvalidCode: "Nieprawidłowy lub wygasły kod.",
     errTooManyAttempts: "Zbyt wiele prób. Poczekaj chwilę i spróbuj ponownie.",
     errCodeMismatch: "Kod się nie zgadza po obu stronach. Spróbujcie ponownie z nowym kodem.",
+    errConnectionLost: "Utracono połączenie i nie udało się go wznowić.",
+    errSessionEnded: "Sesja zakończona — drugie urządzenie nie wróciło na czas.",
     errGeneric: "Coś poszło nie tak. Spróbuj ponownie.",
     tryAgain: "Spróbuj ponownie",
+    reconnecting: "Połączenie przerwane, próba wznowienia…",
 
     transferSenderHint: "Wybierz pliki do wysłania",
     transferWaitingForFiles: "Czekam na pliki…",
@@ -118,8 +121,11 @@ export const STRINGS = {
     errInvalidCode: "Invalid or expired code.",
     errTooManyAttempts: "Too many attempts. Wait a bit and try again.",
     errCodeMismatch: "The code didn't match on both sides. Try again with a new code.",
+    errConnectionLost: "Connection lost and couldn't be resumed.",
+    errSessionEnded: "Session ended — the other device didn't come back in time.",
     errGeneric: "Something went wrong. Please try again.",
     tryAgain: "Try again",
+    reconnecting: "Connection lost, trying to reconnect…",
 
     transferSenderHint: "Choose files to send",
     transferWaitingForFiles: "Waiting for files…",

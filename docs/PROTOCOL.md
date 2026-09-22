@@ -4,10 +4,9 @@ This document describes the wire protocol between a Quicksend client
 (the PWA, or an alternative implementation) and the relay, in enough
 detail to implement a compatible client without reading the Go source.
 
-It's written incrementally as features land; sections for pairing
-(QR / code+PAKE), file transfer, reconnect, and role swap will be added
-as those build steps are implemented. This revision covers only the
-session lifecycle and message transport.
+It's written incrementally as features land; a section for role swap
+will be added once that build step is implemented. This revision adds
+reconnect on top of session lifecycle, pairing, and file transfer.
 
 ## Transport
 
@@ -33,11 +32,12 @@ Every text frame is a JSON object:
 
 ## Relay behavior
 
-The relay only parses and acts on three message types:
-`create_session`, `join`, and `end_session` (below). Every other text
-message — and every binary frame — is relayed byte-for-byte to the
-other peer in the session, unparsed. This is intentional: it's what
-lets pairing (`pake_msg`), transfer metadata (`file_meta`), acks,
+The relay only parses and acts on a handful of message types:
+`create_session`, `join`, `create_code_session`, `join_by_code`,
+`end_session`, `reconnect`, and `reconnect_token` (below). Every other
+text message — and every binary frame — is relayed byte-for-byte to
+the other peer in the session, unparsed. This is intentional: it's
+what lets pairing (`pake_msg`), transfer metadata (`file_meta`), acks,
 role-swap negotiation, etc. be end-to-end between the two clients
 without the relay needing to understand (or be updated for) their
 formats.
@@ -82,9 +82,20 @@ session as guest.
 
 ### `paired` (relay → both clients)
 
-Sent to both host and guest once `join` succeeds. No payload. Once
-both sides have received `paired`, any further message either side
-sends is relayed to the other (see "Relay behavior" above).
+Sent to both host and guest once `join` (or `join_by_code`) succeeds.
+
+```json
+{ "type": "paired", "payload": { "sessionId": "<base64url>" } }
+```
+
+Once both sides have received `paired`, any further message either
+side sends is relayed to the other (see "Relay behavior" above).
+`sessionId` lets each client register a reconnect token (see
+"Reconnect" below) — for QR pairing the client already knows it from
+`session_created`, but it's the *only* way a code+PAKE client learns
+its session ID, since `create_code_session`/`join_by_code` deliberately
+never expose it (the pairing code is the only identifier a
+code+PAKE user ever sees).
 
 ### `end_session` (either client → relay)
 
@@ -116,9 +127,9 @@ Sent when the other peer's WebSocket connection drops (network blip,
 tab closed, etc.), *before* the grace period expires. No payload. The
 session is kept alive; the client should show a "reconnecting" status
 rather than treating this as fatal. If the peer reconnects in time
-(reconnect protocol documented once that step lands), transfer can
-resume; if not, `session_ended` with reason `peer_timeout` follows once
-the grace period elapses.
+(see "Reconnect" below), the session (though not any transfer that was
+mid-flight — see below) picks back up; if not, `session_ended` with
+reason `peer_timeout` follows once the grace period elapses.
 
 ### `error` (relay → client)
 
@@ -134,7 +145,10 @@ Codes:
 | `session_full`         | The session already has a connected guest.                      |
 | `too_many_sessions`    | The client's IP is at `QUICKSEND_MAX_SESSIONS_PER_IP`.           |
 | `already_in_session`   | Reserved for future use.                                         |
-| `invalid_message`      | The first message wasn't valid JSON, or wasn't `create_session`/`join`. |
+| `invalid_message`      | The first message wasn't valid JSON, or wasn't a recognized session-starting type. |
+| `invalid_code`         | `join_by_code`'s code doesn't match any active, unexpired code session. |
+| `too_many_attempts`    | Too many wrong `join_by_code` guesses recently from this IP.     |
+| `invalid_reconnect_token` | `reconnect`'s sessionId/role/token don't match a resumable, currently-disconnected peer slot. |
 
 An `error` in response to the *first* message is followed by the relay
 closing the connection.
@@ -210,9 +224,9 @@ fileKey  = HKDF-SHA256(ikm=epochKey,   salt=fileID (16 bytes),         info="qui
 
 - `epoch` starts at 0 for a fresh pairing and increments by one on
   every successful reconnect. Both peers derive it identically without
-  it ever appearing on the wire (protocol for keeping it synchronized
-  across reconnects lands with that build step; until then only epoch
-  0 exists).
+  it ever appearing on the wire: the reconnecting peer bumps it on
+  receiving `reconnected`, the other peer bumps it on receiving
+  `peer_reconnected` — see "Reconnect" below.
 - `fileID` is 16 bytes chosen by the sender, unique per file, sent
   (encrypted) as part of that file's metadata (`file_meta`, format
   TBD).
@@ -239,11 +253,12 @@ what the sender used.
 reconnectToken = HMAC-SHA256(key=sessionKey, message="quicksend-reconnect" ‖ sessionId)
 ```
 
-Computed once by each peer after pairing and given to the relay as an
-opaque bearer credential (the relay stores and compares it, but can
-never compute or forge it itself since it doesn't have `sessionKey`).
-Presented again to resume the session after a disconnect (exact
-handshake documented once the reconnect build step lands).
+Computed once by each peer right after pairing (see `paired`'s
+`sessionId`) and registered with the relay as an opaque bearer
+credential via `reconnect_token` — the relay stores and compares it,
+but can never compute or forge it itself since it doesn't have
+`sessionKey`. Presented again in `reconnect` to resume the session
+after a disconnect — see "Reconnect" below.
 
 ### Reference implementations & test vectors
 
@@ -380,12 +395,81 @@ once, pausing further reads/sends until `chunk_ack`s catch up —
 backpressure that adapts to how fast the receiver can actually consume
 data, rather than a fixed messages-per-minute cap.
 
+## Reconnect
+
+Lets a session survive a dropped WebSocket connection (network blip,
+backgrounded tab, brief Wi-Fi handoff) without re-pairing. It resumes
+the *session* — both peers keep `sessionKey` and can keep sending
+files under it — but **not any file transfer that was in flight at the
+moment of the drop**: `sendFile`/`attachReceiver` both fail fast on a
+closed socket rather than hang, so the sender must resend and the
+receiver discards the partial file. Full byte-level transfer resume is
+deferred (see docs/DECISIONS.md).
+
+### `reconnect_token` (client → relay, relayed to no one)
+
+Sent once by each peer right after receiving `paired`, registering the
+bearer credential (see "Reconnect token" above) the relay will require
+from that peer to resume this session later.
+
+```json
+{ "type": "reconnect_token", "payload": { "tokenHex": "<hex>" } }
+```
+
+The relay stores this opaquely against whichever slot (host/guest) the
+sending connection occupies. It never relays it to the other peer and
+never computes or checks its contents — it only compares byte-for-byte
+against what a later `reconnect` presents.
+
+### `reconnect` (client → relay)
+
+Sent as the first message on a *new* connection, in place of
+`create_session`/`join`/etc, to resume an existing session after its
+previous connection for this peer dropped.
+
+```json
+{ "type": "reconnect", "payload": { "sessionId": "<base64url>", "role": "host", "tokenHex": "<hex>" } }
+```
+
+`role` is `"host"` or `"guest"`, matching whichever slot this peer
+occupied before disconnecting. The relay accepts this only if:
+
+- `sessionId` refers to a session that still exists (within its
+  reconnect grace period or inactivity timeout — see "Limits"),
+- `role`'s slot in that session is currently disconnected (not already
+  resumed by someone else, and not still connected — a live connection
+  can't be hijacked by a reconnect attempt), and
+- `tokenHex` byte-for-byte matches the token that role registered via
+  `reconnect_token`.
+
+Any mismatch — unknown session, wrong role, wrong token, or a role
+that's still connected — gets the *same* `error{code:
+"invalid_reconnect_token"}` rather than distinguishing which case it
+was, so a failed guess can't be used to probe which sessions exist.
+
+### `reconnected` (relay → the reconnecting client)
+
+Confirms a `reconnect` succeeded. No payload. The client bumps its
+local epoch counter on receiving this (see "Key derivation" above) and
+should rebuild its transfer UI against the new epoch key — any file
+that was mid-transfer is not resumed (see above).
+
+### `peer_reconnected` (relay → the other, still-connected client)
+
+Sent to whichever peer *didn't* drop, once the other side's `reconnect`
+succeeds. No payload. This peer's own socket is untouched — only its
+local epoch counter and derived epoch key need to advance, kept in
+lockstep with the reconnecting peer purely by both sides reacting to
+their respective message (`reconnected` there, `peer_reconnected`
+here) for the same event, without the epoch number itself ever
+crossing the wire.
+
 ## Not yet in this document
 
-- Reconnect: how a client re-attaches to its existing session, resumes
-  a transfer, and how the epoch counter above stays synchronized.
 - Role swap: `role_swap_request`/`role_swap_response`/`role_swap_applied`.
 - Aborting a single transfer vs. ending the whole session.
 - Bundling multiple files into a streamed ZIP.
+- Resuming a file transfer that was in flight across a reconnect
+  (currently: the whole file is simply resent from scratch).
 
 Each will be appended here as its build step lands.

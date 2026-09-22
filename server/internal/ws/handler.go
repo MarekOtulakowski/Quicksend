@@ -5,6 +5,7 @@ package ws
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -86,14 +87,42 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		binary := typ == websocket.MessageBinary
-		if !binary && isEndSession(data) {
-			h.hub.EndSession(ctx, sess, role)
-			endedExplicitly = true
-			return
+		if !binary {
+			switch controlType(data) {
+			case proto.TypeEndSession:
+				h.hub.EndSession(ctx, sess, role)
+				endedExplicitly = true
+				return
+			case proto.TypeReconnectToken:
+				h.handleReconnectToken(sess, role, data)
+				continue
+			}
 		}
 
 		h.hub.Relay(ctx, sess, role, binary, data)
 	}
+}
+
+// handleReconnectToken registers the bearer token role's peer just
+// generated for resuming this session later (see
+// session.Hub.RegisterReconnectToken). Malformed payloads are
+// silently ignored rather than closing the connection: a client that
+// never successfully registers a token simply can't reconnect later,
+// which is no worse than not having reconnect support at all.
+func (h *handler) handleReconnectToken(sess *session.Session, role session.Role, data []byte) {
+	var env proto.Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return
+	}
+	var payload proto.ReconnectTokenPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	token, err := hex.DecodeString(payload.TokenHex)
+	if err != nil {
+		return
+	}
+	h.hub.RegisterReconnectToken(sess, role, token)
 }
 
 func (h *handler) beginSession(ctx context.Context, env proto.Envelope, ip string, c *conn) (*session.Session, session.Role, error) {
@@ -114,24 +143,50 @@ func (h *handler) beginSession(ctx context.Context, env proto.Envelope, ip strin
 			return nil, 0, errInvalidMessage
 		}
 		return h.hub.JoinByCode(ctx, payload.Code, ip, c)
+	case proto.TypeReconnect:
+		var payload proto.ReconnectPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return nil, 0, errInvalidMessage
+		}
+		role, ok := parseRole(payload.Role)
+		if !ok {
+			return nil, 0, errInvalidMessage
+		}
+		token, err := hex.DecodeString(payload.TokenHex)
+		if err != nil {
+			return nil, 0, errInvalidMessage
+		}
+		return h.hub.Reconnect(ctx, payload.SessionID, role, token, ip, c)
 	default:
 		return nil, 0, errInvalidMessage
 	}
 }
 
-var errInvalidMessage = errors.New("first message must be create_session, join, create_code_session, or join_by_code")
+var errInvalidMessage = errors.New("first message must be create_session, join, create_code_session, join_by_code, or reconnect")
 
-// isEndSession reports whether data is a text control message with
-// type "end_session", without otherwise interpreting it. Everything
-// else — including other known control types like pake_msg or
-// file_meta — is relayed opaquely; the relay only needs to act on
-// end_session itself.
-func isEndSession(data []byte) bool {
+func parseRole(wire string) (session.Role, bool) {
+	switch wire {
+	case proto.RoleHostWire:
+		return session.RoleHost, true
+	case proto.RoleGuestWire:
+		return session.RoleGuest, true
+	default:
+		return 0, false
+	}
+}
+
+// controlType returns the envelope type of a text control message
+// without otherwise interpreting it, or "" if data isn't a valid
+// envelope. Used to pick out the handful of types the relay itself
+// must act on (end_session, reconnect_token); every other known
+// control type — pake_msg, file_meta, chunk_ack, ... — is relayed
+// opaquely and never reaches this switch.
+func controlType(data []byte) string {
 	var env proto.Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
-		return false
+		return ""
 	}
-	return env.Type == proto.TypeEndSession
+	return env.Type
 }
 
 func sendError(ctx context.Context, c *conn, code, message string) {
@@ -158,6 +213,8 @@ func errCode(err error) string {
 		return proto.ErrCodeInvalidCode
 	case errors.Is(err, session.ErrTooManyAttempts):
 		return proto.ErrCodeTooManyAttempts
+	case errors.Is(err, session.ErrInvalidReconnectToken):
+		return proto.ErrCodeInvalidReconnectToken
 	default:
 		return proto.ErrCodeInvalidMessage
 	}

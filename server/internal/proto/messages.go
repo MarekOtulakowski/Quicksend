@@ -32,6 +32,9 @@ const (
 	TypeEndSession         = "end_session"
 	TypeSessionEnded       = "session_ended"
 	TypePeerDisconnected   = "peer_disconnected"
+	TypeReconnectToken     = "reconnect_token"
+	TypeReconnect          = "reconnect"
+	TypeReconnected        = "reconnected"
 	TypePeerReconnected    = "peer_reconnected"
 	TypeError              = "error"
 )
@@ -90,6 +93,41 @@ type PakeConfirmPayload struct {
 	TagHex string `json:"tagHex"`
 }
 
+// PairedPayload is sent to both peers once they're attached to the
+// same session. SessionID lets each client compute and register its
+// reconnect token (see ReconnectTokenPayload) — this is the only way
+// a code+PAKE client learns its session ID, since create_code_session/
+// join_by_code deliberately never expose it (the human-facing pairing
+// code is the only identifier those flows hand a user).
+type PairedPayload struct {
+	SessionID string `json:"sessionId"`
+}
+
+// ReconnectTokenPayload registers the bearer credential (see
+// cryptoutil.DeriveReconnectToken) the sending peer must present to
+// resume this session after a dropped connection. Sent once by each
+// peer right after pairing completes. The relay stores it opaquely
+// and never relays it to the other peer.
+type ReconnectTokenPayload struct {
+	TokenHex string `json:"tokenHex"`
+}
+
+// ReconnectPayload is sent as the first message on a new connection to
+// resume an existing session after a drop, in place of create_session
+// or join. Role is "host" or "guest", matching whichever slot this
+// client occupied before disconnecting.
+type ReconnectPayload struct {
+	SessionID string `json:"sessionId"`
+	Role      string `json:"role"`
+	TokenHex  string `json:"tokenHex"`
+}
+
+// Role values used in ReconnectPayload.
+const (
+	RoleHostWire  = "host"
+	RoleGuestWire = "guest"
+)
+
 // SessionEndedPayload explains why a session was torn down.
 type SessionEndedPayload struct {
 	Reason string `json:"reason"`
@@ -111,11 +149,12 @@ type ErrorPayload struct {
 
 // Error codes the relay can send.
 const (
-	ErrCodeSessionNotFound = "session_not_found"
-	ErrCodeSessionFull     = "session_full"
-	ErrCodeTooManySessions = "too_many_sessions"
-	ErrCodeInvalidMessage  = "invalid_message"
-	ErrCodeAlreadyPaired   = "already_in_session"
-	ErrCodeInvalidCode     = "invalid_code"
-	ErrCodeTooManyAttempts = "too_many_attempts"
+	ErrCodeSessionNotFound       = "session_not_found"
+	ErrCodeSessionFull           = "session_full"
+	ErrCodeTooManySessions       = "too_many_sessions"
+	ErrCodeInvalidMessage        = "invalid_message"
+	ErrCodeAlreadyPaired         = "already_in_session"
+	ErrCodeInvalidCode           = "invalid_code"
+	ErrCodeTooManyAttempts       = "too_many_attempts"
+	ErrCodeInvalidReconnectToken = "invalid_reconnect_token"
 )

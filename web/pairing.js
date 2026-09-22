@@ -13,6 +13,17 @@ import * as b64url from "./base64url.js";
 import * as pake from "./pake.js";
 import { renderTransferUI } from "./transfer-ui.js";
 import { toHex, fromHex } from "./hex.js";
+import { deriveReconnectToken } from "./crypto.js";
+
+// How many times to retry opening a new connection after the paired
+// socket drops unexpectedly, and how long to wait between attempts,
+// before giving up and showing the "connection lost" error screen.
+// The relay itself keeps a session resumable for
+// QUICKSEND_RECONNECT_GRACE_PERIOD (default 45s); this budget is
+// comfortably inside that window without the client needing to know
+// the exact server-side value.
+const RECONNECT_MAX_ATTEMPTS = 6;
+const RECONNECT_RETRY_DELAY_MS = 2000;
 
 const SESSION_KEY_BYTES = 32;
 
@@ -64,6 +75,7 @@ async function runPakeExchange(socket, code, pakeRole) {
 let currentState = { screen: "role-select" };
 let activeSocket = null;
 let activeStopScan = null;
+let activeTransferDetach = null;
 
 function buildPairingURL(sessionId, sessionKey) {
   const url = new URL(location.href);
@@ -108,6 +120,21 @@ function cleanupActive() {
     }
     activeSocket = null;
   }
+  detachActiveTransfer();
+}
+
+/** Detaches the current transfer UI's socket listener, if any. Must
+ * run before rendering a new one over it (renderPaired does this
+ * itself) and before leaving the paired screen entirely — otherwise a
+ * receiver's listener from a torn-down render stays attached to a
+ * socket that outlives it (e.g. a reconnect that only affected the
+ * *other* peer leaves this socket untouched) and keeps trying to
+ * decrypt new traffic under a stale epoch key. */
+function detachActiveTransfer() {
+  if (activeTransferDetach) {
+    activeTransferDetach();
+    activeTransferDetach = null;
+  }
 }
 
 /** Tears down any in-flight connection/camera and moves to a new
@@ -141,7 +168,9 @@ export function initPairing(container) {
 }
 
 /** Returns the active paired session for later build steps (transfer,
- * role swap, reconnect) to use, or null if not currently paired. */
+ * role swap) to use, or null if not currently paired. epoch advances
+ * by one on every successful reconnect (either peer) — see
+ * transfer-ui.js's renderTransferUI. */
 export function getPairedSession() {
   if (currentState.screen !== "paired") return null;
   return {
@@ -149,6 +178,7 @@ export function getPairedSession() {
     sessionId: currentState.sessionId,
     sessionKey: currentState.sessionKey,
     role: currentState.role,
+    epoch: currentState.epoch,
   };
 }
 
@@ -293,12 +323,7 @@ function startReceiverFlow(container) {
       const url = buildPairingURL(sessionId, sessionKey);
       advance(container, { screen: "receiver-waiting", sessionId, sessionKey, url });
     } else if (env.type === "paired") {
-      advance(container, {
-        screen: "paired",
-        role: "host",
-        sessionId: currentState.sessionId,
-        sessionKey: currentState.sessionKey,
-      });
+      finalizePaired(container, socket, currentState.sessionId, currentState.sessionKey, "host");
     } else if (env.type === "error") {
       setState(container, { screen: "error", code: env.payload && env.payload.code });
     }
@@ -331,10 +356,11 @@ function startReceiverCodeFlow(container) {
       });
     } else if (env.type === "paired") {
       const code = currentState.code;
+      const sessionId = env.payload && env.payload.sessionId;
       advance(container, { screen: "verifying" });
       runPakeExchange(socket, code, 0)
         .then((sessionKey) => {
-          advance(container, { screen: "paired", role: "host", sessionKey });
+          finalizePaired(container, socket, sessionId, sessionKey, "host");
         })
         .catch(() => {
           setState(container, { screen: "error", code: "code_mismatch" });
@@ -407,10 +433,11 @@ function startJoinByCode(container, code) {
     if (!env) return;
 
     if (env.type === "paired") {
+      const sessionId = env.payload && env.payload.sessionId;
       advance(container, { screen: "verifying" });
       runPakeExchange(socket, code, 1)
         .then((sessionKey) => {
-          advance(container, { screen: "paired", role: "guest", sessionKey });
+          finalizePaired(container, socket, sessionId, sessionKey, "guest");
         })
         .catch(() => {
           setState(container, { screen: "error", code: "code_mismatch" });
@@ -527,7 +554,7 @@ function startJoin(container, sessionId, sessionKey) {
     if (!env) return;
 
     if (env.type === "paired") {
-      advance(container, { screen: "paired", role: "guest", sessionId, sessionKey });
+      finalizePaired(container, socket, sessionId, sessionKey, "guest");
     } else if (env.type === "error") {
       setState(container, { screen: "error", code: env.payload && env.payload.code });
     }
@@ -540,13 +567,118 @@ function startJoin(container, sessionId, sessionKey) {
   });
 }
 
+let reconnectStatusEl = null;
+
+function showReconnectStatus(text) {
+  if (!reconnectStatusEl) return;
+  reconnectStatusEl.textContent = text || "";
+  reconnectStatusEl.hidden = !text;
+}
+
 function renderPaired(container) {
+  // Re-rendering (e.g. after a reconnect or a peer_reconnected
+  // notification) must detach the previous transfer UI's socket
+  // listener first — see detachActiveTransfer.
+  detachActiveTransfer();
+
   const text = currentState.role === "host" ? t("statusPairedHost") : t("statusPairedGuest");
   container.appendChild(paragraph(text, "status-paired"));
 
+  reconnectStatusEl = paragraph("", "muted");
+  reconnectStatusEl.hidden = true;
+  container.appendChild(reconnectStatusEl);
+
   const transferRoot = document.createElement("div");
   container.appendChild(transferRoot);
-  renderTransferUI(transferRoot, getPairedSession());
+  renderTransferUI(transferRoot, getPairedSession()).then((detach) => {
+    activeTransferDetach = detach;
+  });
+}
+
+/** Finishes the pairing flow common to all four pairing paths (QR
+ * host/guest, code host/guest): registers this peer's reconnect token
+ * with the relay, wires up automatic reconnection for the paired
+ * socket, and moves to the "paired" screen. sessionId must be the
+ * relay's session ID (from session_created for QR, or from paired's
+ * payload for code+PAKE — see proto.PairedPayload). */
+function finalizePaired(container, socket, sessionId, sessionKey, role) {
+  currentState = { screen: "paired", sessionId, sessionKey, role, epoch: 0 };
+  deriveReconnectToken(sessionKey, sessionId).then((token) => {
+    currentState = { ...currentState, reconnectToken: token };
+    sendEnvelope(socket, "reconnect_token", { tokenHex: toHex(token) });
+  });
+  wirePairedSocket(container, socket);
+  render(container);
+}
+
+/** Attaches the listeners that keep a paired session alive across a
+ * dropped connection: session_ended ends things for good, peer_reconnected
+ * bumps the local epoch (the other side reconnected, we didn't), and an
+ * unexpected close of our own socket triggers attemptReconnect. */
+function wirePairedSocket(container, socket) {
+  socket.addEventListener("message", (event) => {
+    const env = parseEnvelope(event);
+    if (!env) return;
+    if (env.type === "session_ended") {
+      setState(container, { screen: "error", code: "session_ended" });
+    } else if (env.type === "peer_reconnected") {
+      currentState = { ...currentState, epoch: currentState.epoch + 1 };
+      render(container);
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (currentState.screen !== "paired" || activeSocket !== socket) return;
+    activeSocket = null;
+    attemptReconnect(container, 1);
+  });
+}
+
+/** Tries to resume the paired session on a fresh socket after the
+ * previous one dropped unexpectedly (network blip, backgrounded tab,
+ * etc). Any file transfer that was in flight at the time of the drop
+ * is not resumed — sendFile/attachReceiver both fail fast on a closed
+ * socket (see transfer.js) rather than hanging, and this rebuilds the
+ * transfer UI from scratch once reconnected. See docs/DECISIONS.md. */
+function attemptReconnect(container, attempt) {
+  if (currentState.screen !== "paired") return;
+  showReconnectStatus(t("reconnecting"));
+
+  const { sessionId, role, reconnectToken } = currentState;
+  if (!reconnectToken) {
+    // Dropped before this peer even finished registering its token —
+    // nothing the relay would accept a reconnect for.
+    setState(container, { screen: "error", code: "connection_lost" });
+    return;
+  }
+
+  const socket = connect();
+
+  socket.addEventListener("open", () => {
+    sendEnvelope(socket, "reconnect", { sessionId, role, tokenHex: toHex(reconnectToken) });
+  });
+
+  socket.addEventListener("message", (event) => {
+    const env = parseEnvelope(event);
+    if (!env) return;
+    if (env.type === "reconnected") {
+      activeSocket = socket;
+      showReconnectStatus(null);
+      currentState = { ...currentState, epoch: currentState.epoch + 1 };
+      wirePairedSocket(container, socket);
+      render(container);
+    } else if (env.type === "error") {
+      setState(container, { screen: "error", code: (env.payload && env.payload.code) || "connection_lost" });
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    if (currentState.screen !== "paired" || activeSocket === socket) return;
+    if (attempt >= RECONNECT_MAX_ATTEMPTS) {
+      setState(container, { screen: "error", code: "connection_lost" });
+      return;
+    }
+    setTimeout(() => attemptReconnect(container, attempt + 1), RECONNECT_RETRY_DELAY_MS);
+  });
 }
 
 const ERROR_MESSAGE_KEYS = {
@@ -559,6 +691,9 @@ const ERROR_MESSAGE_KEYS = {
   invalid_code: "errInvalidCode",
   too_many_attempts: "errTooManyAttempts",
   code_mismatch: "errCodeMismatch",
+  connection_lost: "errConnectionLost",
+  session_ended: "errSessionEnded",
+  invalid_reconnect_token: "errConnectionLost",
 };
 
 function renderError(container) {

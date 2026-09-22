@@ -83,13 +83,17 @@ more).
 
 - QR pairing and remote code+PAKE pairing
 - End-to-end encrypted file transfer with flow-controlled backpressure
+- Reconnecting a dropped connection without re-pairing (session-level;
+  a file that was mid-transfer at the moment of the drop is not
+  resumed — see docs/DECISIONS.md)
 - Saving via the File System Access API, with an in-memory Blob
   fallback for browsers without it
 - Light/dark theme, Polish/English UI
 
 ### Not yet implemented
 
-- Reconnecting an in-progress transfer after a dropped connection
+- Resuming a file transfer that was in flight across a reconnect
+  (currently: the whole file is simply resent)
 - Swapping sender/receiver roles mid-session
 - Aborting a single transfer without ending the whole session
 - Bundling multiple files into a streamed ZIP (currently saved as
