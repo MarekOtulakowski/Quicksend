@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#17181a" media="(prefers-color-scheme: dark)">
+<title>Quicksend</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="styles.css">
+<script>
+  try {
+    var t = localStorage.getItem("quicksend-theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+</head>
+<body>
+<header>
+  <h1>Quicksend</h1>
+  <div id="theme-toggle" class="theme-toggle"></div>
+</header>
+<main>
+  <p class="muted">Relay i logika transferu w budowie.</p>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "name": "Quicksend",
+  "short_name": "Quicksend",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff"
+}

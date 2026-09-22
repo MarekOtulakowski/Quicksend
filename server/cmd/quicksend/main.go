@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	quicksend "github.com/MarekOtulakowski/Quicksend"
 	"github.com/MarekOtulakowski/Quicksend/server/internal/config"
 )
 
@@ -25,8 +27,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	webRoot, err := fs.Sub(quicksend.WebFS, "web")
+	if err != nil {
+		slog.Error("failed to load embedded web assets", "error", err)
+		os.Exit(1)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
