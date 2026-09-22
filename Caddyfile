@@ -12,5 +12,14 @@
 }
 
 {$QUICKSEND_DOMAIN} {
+	# DNS-01: Caddy proves domain ownership to Let's Encrypt by
+	# creating a TXT record via Cloudflare's API, instead of the
+	# default HTTP-01 challenge (which needs an inbound request on
+	# port 80). This is what lets port 80 stay closed on the VPS's
+	# firewall — see docs/DECISIONS.md.
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
 	reverse_proxy quicksend:8080
 }

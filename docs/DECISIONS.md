@@ -726,15 +726,22 @@ per-file counter actually resets rather than wedging the session.
 
 ## docker-compose.yml: Caddy specifically, and the relay never gets a published port
 
-**What:** the example production `docker-compose.yml` runs two
-services — the relay (built from the repo's own `Dockerfile`, no
-`ports:` entry) and `caddy:2-alpine` (the only one with published
-ports, 80 and 443) reverse-proxying to the relay over the compose
-file's default internal network. The domain to request a certificate
-for comes from `QUICKSEND_DOMAIN`, read from a gitignored `.env` (a
-committed `.env.example` documents it); the Caddyfile references it
-via Caddy's own `{$VAR}` env-var substitution rather than needing any
-templating step.
+**Status:** the Caddy image and which port(s) are published both
+changed after this entry was written — see "Production TLS: Cloudflare
+DNS-01, not the default HTTP-01" below for the current setup (a
+custom-built Caddy image, port 80 no longer published at all). The
+reasoning below for picking Caddy itself, and for the relay never
+having a published port, still holds.
+
+**What (as originally built):** the example production
+`docker-compose.yml` runs two services — the relay (built from the
+repo's own `Dockerfile`, no `ports:` entry) and `caddy:2-alpine` (the
+only one with published ports, 80 and 443) reverse-proxying to the
+relay over the compose file's default internal network. The domain to
+request a certificate for comes from `QUICKSEND_DOMAIN`, read from a
+gitignored `.env` (a committed `.env.example` documents it); the
+Caddyfile references it via Caddy's own `{$VAR}` env-var substitution
+rather than needing any templating step.
 
 **Why Caddy, specifically, for the example:** the brief left the choice
 of reverse proxy open (Caddy, Traefik, and Cloudflare Tunnel are all
@@ -834,6 +841,12 @@ pairing-and-transfer flow succeeds end-to-end once served over HTTPS
 via docker-compose with the LAN IP as `QUICKSEND_DOMAIN`.
 
 ## Caddy needs `default_sni` for a bare-IP `QUICKSEND_DOMAIN`
+
+**Status:** the scenario this fixed (self-signed LAN-IP testing) was
+later ruled out entirely — see "Production TLS: Cloudflare DNS-01"
+below — but the option itself is left in the Caddyfile, since it's
+harmless for a real domain (which always sends proper SNI) and costs
+nothing to keep.
 
 **What:** using a LAN IP address as `QUICKSEND_DOMAIN` (per the fix
 above) failed at the TLS layer even though Caddy had already obtained
@@ -941,3 +954,60 @@ scripted) against a live paired session: confirmed the drop zone's
 active-state styling toggles on `dragenter`, the dropped file sends
 and is received successfully, and the ordinary click-to-pick button
 still works immediately afterward in the same session.
+
+## Production TLS: Cloudflare DNS-01, not the default HTTP-01
+
+**What:** `docker-compose.yml`'s Caddy service now proves domain
+ownership to Let's Encrypt via a DNS TXT record created through
+Cloudflare's API (`tls { dns cloudflare {env.CLOUDFLARE_API_TOKEN} }`
+in the Caddyfile), instead of Caddy's default behavior of answering an
+inbound HTTP request on port 80 (the "HTTP-01" challenge). Only port
+443 is published in `docker-compose.yml` now; port 80 is gone
+entirely. Since the stock `caddy:2-alpine` image doesn't include any
+DNS provider module, `caddy/Dockerfile` builds one from source via
+`xcaddy build --with github.com/caddy-dns/cloudflare` — the officially
+documented way to add a Caddy module — rather than pulling a
+third-party prebuilt image with unknown provenance, consistent with
+how the rest of this project builds everything (the PAKE WASM module,
+the relay itself) from source rather than trusting prebuilt artifacts.
+
+**Why this changed from the earlier HTTP-01 default:** requested by
+the user, who didn't want to open port 80 on their VPS's firewall at
+all — a reasonable stance; HTTP-01 needs an unauthenticated inbound
+port reachable from the entire internet just to prove domain
+ownership, which is more exposure than the DNS-01 alternative
+requires. This also happened to make the earlier idea of testing with
+`QUICKSEND_DOMAIN` set to a bare LAN IP a dead end for this same
+compose file going forward: DNS-01 fundamentally needs a real domain
+whose DNS records Caddy (via Cloudflare's API) can modify, which an IP
+address doesn't have — that path is documented as no longer available
+in README's "Testing between two real devices" section, after two
+alternatives (accepting a self-signed certificate's warning, and
+installing Caddy's local CA as a trusted root) were both explicitly
+ruled out by the user: browsers on their real iOS/Android devices
+hard-blocked the self-signed warning path rather than merely warning
+about it, and installing a foreign root CA on a personal phone is a
+real, standing trust decision they were right not to make lightly —
+it would let that CA impersonate *any* site, not just this one.
+
+**Why a scoped API token, not the account's Global API Key**
+(documented in `.env.example`): a token restricted to "Zone / DNS /
+Edit" on just the one zone that owns `QUICKSEND_DOMAIN` limits the
+blast radius if it's ever leaked (e.g. via a compromised VPS) to DNS
+records on that single domain — the Global API Key can modify
+anything on the whole Cloudflare account, which is a needlessly large
+amount of trust to hand to one server for one purpose.
+
+**Verified:** built `caddy/Dockerfile` and confirmed the Cloudflare
+module actually compiles in and is recognized (`caddy build-info`
+equivalent: the binary loads a Caddyfile referencing `dns cloudflare`
+without an "unrecognized module" error), and confirmed `caddy
+validate` accepts the full Caddyfile — including `default_sni` and the
+`tls { dns cloudflare ... }` block together — once given a
+realistically-shaped (if fake) token; it correctly rejects an
+obviously-malformed one first, proving the module's own token format
+check runs before anything else. Actually obtaining a real certificate
+via a live Cloudflare zone couldn't be verified from this environment,
+which has no real domain or Cloudflare account to test against — that
+step relies on Caddy's and the `caddy-dns/cloudflare` module's own
+correctness, both well-established, non-experimental software.

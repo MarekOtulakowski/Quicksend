@@ -1,17 +1,23 @@
-# Example production deployment: Caddy terminates TLS (automatic via
-# Let's Encrypt, using QUICKSEND_DOMAIN) and reverse-proxies to the
-# relay over Docker's internal network. The relay itself has no
-# published port — it's only reachable through Caddy. This matters for
-# more than isolation: QUICKSEND_MAX_SESSIONS_PER_IP trusts the
-# X-Forwarded-For header Caddy sets, which is only safe when the relay
-# can't be reached directly (see docs/DECISIONS.md).
+# Example production deployment: Caddy terminates TLS (via Let's
+# Encrypt, using DNS-01 through Cloudflare's API rather than the
+# default HTTP-01 challenge — see docs/DECISIONS.md for why) and
+# reverse-proxies to the relay over Docker's internal network. The
+# relay itself has no published port — it's only reachable through
+# Caddy. This matters for more than isolation:
+# QUICKSEND_MAX_SESSIONS_PER_IP trusts the X-Forwarded-For header
+# Caddy sets, which is only safe when the relay can't be reached
+# directly.
 #
 # Usage:
-#   cp .env.example .env   # then edit QUICKSEND_DOMAIN in .env
+#   cp .env.example .env   # then edit QUICKSEND_DOMAIN and
+#                           # CLOUDFLARE_API_TOKEN in .env
 #   docker compose up -d
 #
-# For local/LAN testing without a domain or TLS, use `docker run`
-# directly instead — see the Quick start section in README.md.
+# Requires: the domain's DNS managed by Cloudflare, and port 443 (not
+# 80 — DNS-01 needs no inbound port for the challenge itself) reachable
+# from the internet. For local/LAN testing without any of that, use
+# `docker run` directly instead — see the Quick start section in
+# README.md.
 
 services:
   quicksend:
@@ -26,15 +32,15 @@ services:
       # QUICKSEND_MAX_FILE_SIZE_BYTES: "5368709120"
 
   caddy:
-    image: caddy:2-alpine
+    build: ./caddy
     restart: unless-stopped
     depends_on:
       - quicksend
     ports:
-      - "80:80"
       - "443:443"
     environment:
       QUICKSEND_DOMAIN: ${QUICKSEND_DOMAIN:?set QUICKSEND_DOMAIN in .env — see .env.example}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in .env — see .env.example}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

@@ -38,7 +38,7 @@ file: browsers only expose the Web Crypto API Quicksend needs for
 never over plain HTTP to a LAN IP. Pairing itself can look like it
 works there (it only needs `crypto.getRandomValues`, which has no such
 restriction), but everything after it — PAKE confirmation, encryption,
-reconnect tokens — silently fails. See "LAN testing between two real
+reconnect tokens — silently fails. See "Testing between two real
 devices" below for the actual way to try it across devices, and
 [docs/DECISIONS.md](docs/DECISIONS.md) for why.
 
@@ -46,26 +46,19 @@ For real use, put a reverse proxy (Caddy, Traefik, Cloudflare Tunnel)
 in front for TLS — the container itself only speaks plain HTTP and is
 not meant to be exposed directly to the internet.
 
-### LAN testing between two real devices
+### Testing between two real devices
 
 The plain `docker run` above only serves plain HTTP, which — per the
 note above — isn't a secure context except on `localhost` itself, so
-it can't actually pair two *different* devices. To test for real
-between, say, a phone and a computer on the same network without a
-public domain, use [`docker-compose.yml`](docker-compose.yml) (see
-"Production deployment" below) with `QUICKSEND_DOMAIN` set to your
-machine's LAN IP instead of a real domain:
-
-```sh
-cp .env.example .env
-# edit .env: QUICKSEND_DOMAIN=<your machine's LAN IP, e.g. 192.168.1.42>
-docker compose up -d
-```
-
-Caddy can't get a Let's Encrypt certificate for a bare IP, so it falls
-back to a self-signed one automatically — every device will show a
-certificate warning once, which is expected; accept it to continue.
-Open `https://<that LAN IP>` on both devices.
+it can't actually pair two *different* devices, and
+[`docker-compose.yml`](docker-compose.yml) (see "Production
+deployment" below) needs a real domain on Cloudflare — it can't issue
+a certificate for a bare LAN IP. Without either of those, the only way
+to exercise real pairing/encryption/transfer is two browser
+tabs/windows on the same machine, both on `http://localhost:8080`:
+that's enough to confirm the whole protocol works correctly, just not
+a physically-separate-device test. For an actual cross-device test,
+skip straight to "Production deployment" with a real domain.
 
 ### Production deployment
 
@@ -79,10 +72,20 @@ it trusts the `X-Forwarded-For` header Caddy sets, which only means
 anything when the relay can't be reached any other way (see
 [docs/DECISIONS.md](docs/DECISIONS.md)).
 
+Caddy proves domain ownership to Let's Encrypt via a DNS TXT record
+through Cloudflare's API (the "DNS-01" challenge) rather than by
+answering an inbound HTTP request (the default "HTTP-01" challenge) —
+**only port 443 needs to be reachable from the internet, never port
+80.** This requires the domain's DNS to be managed by Cloudflare and a
+scoped Cloudflare API token (see `.env.example` for exactly which
+permission it needs). `caddy/Dockerfile` builds Caddy with the
+Cloudflare DNS module from source via `xcaddy`, since the plain
+`caddy:2-alpine` image doesn't include it.
+
 ```sh
 cp .env.example .env
-# edit .env: set QUICKSEND_DOMAIN to a domain that already points at
-# this host (Caddy needs that to obtain a certificate for it)
+# edit .env: set QUICKSEND_DOMAIN (its DNS must be on Cloudflare) and
+# CLOUDFLARE_API_TOKEN (see .env.example for how to scope it)
 docker compose up -d
 ```
 
@@ -150,10 +153,12 @@ more).
   per-file dialogs, falling back to a per-file save prompt or an
   in-memory Blob download on browsers without that API
 - A clear error instead of a silent failure when the page is opened
-  somewhere Web Crypto isn't available (see "LAN testing" above)
+  somewhere Web Crypto isn't available (see "Testing between two real
+  devices" above)
 - Light/dark theme, Polish/English UI
 - `docker-compose.yml` for a production deployment behind Caddy
-  (automatic TLS, relay never directly exposed)
+  (automatic TLS via Cloudflare DNS-01 — no need to open port 80 —
+  relay never directly exposed)
 
 ### Not yet implemented
 
