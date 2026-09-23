@@ -109,11 +109,6 @@ function parsePairingText(text) {
   return { sessionId, sessionKey };
 }
 
-function suggestedRole() {
-  const coarsePointer = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
-  return coarsePointer ? "send" : "receive";
-}
-
 function cleanupActive() {
   if (activeStopScan) {
     activeStopScan();
@@ -217,23 +212,17 @@ function render(container) {
     case "role-select":
       renderRoleSelect(container);
       break;
+    case "code-role-select":
+      renderCodeRoleSelect(container);
+      break;
     case "join-detected":
       renderJoinDetected(container);
-      break;
-    case "receive-method-select":
-      renderReceiveMethodSelect(container);
-      break;
-    case "send-method-select":
-      renderSendMethodSelect(container);
       break;
     case "receiver-generating":
       renderStatus(container, t("receiverGenerating"));
       break;
     case "receiver-waiting":
       renderReceiverWaiting(container);
-      break;
-    case "sender-select":
-      renderSenderSelect(container);
       break;
     case "sender-scanning":
       renderSenderScanning(container);
@@ -293,40 +282,36 @@ function renderStatus(container, text) {
   container.appendChild(paragraph(text, "muted"));
 }
 
+// The start screen used to be role (Receive/Send) then method (QR/
+// code) as two separate screens, plus a third screen for Send+QR
+// (scan/paste) — three clicks before a first-time user saw anything
+// concrete. QR-with-both-devices-together is overwhelmingly the
+// common case, so it's now the direct action on the very first
+// screen; the code+PAKE path (remote devices) is a single small link
+// below it rather than an equally-weighted option, and only reveals
+// its own receive/send choice if actually clicked. See docs/DECISIONS.md.
 function renderRoleSelect(container) {
-  const suggested = suggestedRole();
-  container.appendChild(paragraph(t("roleChooseTitle")));
+  container.appendChild(paragraph(t("appTagline"), "tagline"));
 
   const row = document.createElement("div");
   row.className = "role-row";
-  row.appendChild(
-    button(
-      t("roleReceive"),
-      () => advance(container, { screen: "receive-method-select" }),
-      suggested === "receive" ? "primary-button" : "",
-    ),
-  );
-  row.appendChild(
-    button(
-      t("roleSend"),
-      () => advance(container, { screen: "send-method-select" }),
-      suggested === "send" ? "primary-button" : "",
-    ),
-  );
+  row.appendChild(button(t("startReceive"), () => startReceiverFlow(container), "primary-button start-button"));
+  row.appendChild(button(t("startSend"), () => advance(container, { screen: "sender-scanning" }), "primary-button start-button"));
   container.appendChild(row);
+
+  const link = button(t("remoteCodeLink"), () => advance(container, { screen: "code-role-select" }), "link-button");
+  container.appendChild(link);
 }
 
-function renderReceiveMethodSelect(container) {
-  container.appendChild(paragraph(t("methodChooseTitle")));
-  container.appendChild(button(t("methodQR"), () => startReceiverFlow(container), "primary-button"));
-  container.appendChild(button(t("methodCode"), () => startReceiverCodeFlow(container)));
-  container.appendChild(button(t("backButton"), () => setState(container, { screen: "role-select" })));
-}
+function renderCodeRoleSelect(container) {
+  container.appendChild(paragraph(t("codeRoleChooseTitle")));
 
-function renderSendMethodSelect(container) {
-  container.appendChild(paragraph(t("methodChooseTitle")));
-  container.appendChild(button(t("methodQR"), () => advance(container, { screen: "sender-select" }), "primary-button"));
-  container.appendChild(button(t("methodCode"), () => advance(container, { screen: "code-sender-entry" })));
+  const row = document.createElement("div");
+  row.className = "role-row";
+  row.appendChild(button(t("roleReceive"), () => startReceiverCodeFlow(container)));
+  row.appendChild(button(t("roleSend"), () => advance(container, { screen: "code-sender-entry" })));
+  container.appendChild(row);
+
   container.appendChild(button(t("backButton"), () => setState(container, { screen: "role-select" })));
 }
 
@@ -426,7 +411,7 @@ function renderCodeReceiverWaiting(container) {
   container.appendChild(button(t("copyCodeButton"), () => shareOrCopy({ text: formatted }, shareStatus)));
   container.appendChild(shareStatus);
 
-  container.appendChild(button(t("backButton"), () => setState(container, { screen: "receive-method-select" })));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "code-role-select" })));
 }
 
 function renderCodeSenderEntry(container) {
@@ -459,7 +444,7 @@ function renderCodeSenderEntry(container) {
       "primary-button",
     ),
   );
-  container.appendChild(button(t("backButton"), () => setState(container, { screen: "send-method-select" })));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "code-role-select" })));
 }
 
 function startJoinByCode(container, code) {
@@ -552,14 +537,7 @@ function renderReceiverWaiting(container) {
   container.appendChild(button(t("shareButton"), () => shareOrCopy({ url: currentState.url }, shareStatus)));
   container.appendChild(shareStatus);
 
-  container.appendChild(button(t("backButton"), () => setState(container, { screen: "receive-method-select" })));
-}
-
-function renderSenderSelect(container) {
-  container.appendChild(paragraph(t("senderChooseTitle")));
-  container.appendChild(button(t("senderScan"), () => advance(container, { screen: "sender-scanning" }), "primary-button"));
-  container.appendChild(button(t("senderPaste"), () => advance(container, { screen: "sender-paste" })));
-  container.appendChild(button(t("backButton"), () => setState(container, { screen: "send-method-select" })));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "role-select" })));
 }
 
 function renderSenderScanning(container) {
@@ -573,9 +551,15 @@ function renderSenderScanning(container) {
 
   let cancelled = false;
   container.appendChild(
+    button(t("pasteLinkInsteadButton"), () => {
+      cancelled = true;
+      setState(container, { screen: "sender-paste" });
+    }, "link-button"),
+  );
+  container.appendChild(
     button(t("backButton"), () => {
       cancelled = true;
-      setState(container, { screen: "sender-select" });
+      setState(container, { screen: "role-select" });
     }),
   );
 
@@ -624,7 +608,7 @@ function renderSenderPaste(container) {
       "primary-button",
     ),
   );
-  container.appendChild(button(t("backButton"), () => setState(container, { screen: "sender-select" })));
+  container.appendChild(button(t("backButton"), () => setState(container, { screen: "sender-scanning" })));
 }
 
 function startJoin(container, sessionId, sessionKey) {

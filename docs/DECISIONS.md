@@ -1011,3 +1011,108 @@ via a live Cloudflare zone couldn't be verified from this environment,
 which has no real domain or Cloudflare account to test against — that
 step relies on Caddy's and the `caddy-dns/cloudflare` module's own
 correctness, both well-established, non-experimental software.
+
+## Flattened the pairing flow: QR is the default, code is one small link away
+
+**What:** the start screen used to be role (Receive/Send) then method
+(QR/code) as two separate screens, plus a third screen for Send+QR
+(scan/paste) — three screens/clicks before a first-time user saw
+anything concrete. It's now one screen: two large "Receive"/"Send"
+actions that go straight into the QR flow, plus a single small text
+link ("Remote? Pair with a code instead of QR") that reveals a
+receive/send choice for the code+PAKE path only if actually clicked.
+Send+QR's scan-or-paste choice is gone too — tapping "Send" goes
+straight to the camera, with "paste link instead" now a small link on
+the scanning screen itself rather than an upfront fork.
+
+**Why QR gets the default path and code doesn't**: raised by the user
+after real-world testing — for the overwhelmingly common case (both
+devices physically together), forcing a "how do you want to pair"
+decision before showing anything is friction with no payoff, since
+there's only one sane answer. Code+PAKE pairing (remote devices) is
+the minority case by construction — you only reach for it when you
+*can't* scan a QR — so it stays reachable in exactly one extra click,
+just not competing for equal visual weight with the primary path. This
+is a UX prioritization based on actual usage frequency, not a
+value judgment that the code flow matters less cryptographically — it
+still gets full SPAKE2 protection either way.
+
+**Verified** the flattened click counts directly with Playwright:
+confirmed the receiver-QR screen (with a real pairing link/QR
+rendered) is reached with exactly one click from a fresh page load,
+and that the "remote code" link correctly reveals its own
+receive/send sub-choice without affecting the primary buttons' single-
+click behavior.
+
+## Visual pass toward an Apple-style look
+
+**What:** requested by the user directly ("ma być piękne jak
+macOS/iOS"). Refreshed `styles.css`'s design tokens toward the actual
+iOS/macOS system palette (`#007AFF`/`#0A84FF` accent, true black dark
+mode background matching iOS's OLED-friendly `#000000` rather than a
+dark gray), replaced most hard 1px borders on elevated surfaces (QR
+card, file rows, pairing code, buttons) with soft layered shadows
+(`--shadow`/`--shadow-sm` tokens) for a more "material" sense of depth,
+increased border-radius across cards and buttons for softer corners,
+added a translucent `backdrop-filter: blur()` header that stays
+pinned while scrolling (an iOS navigation-bar convention), a brief
+fade-in transition between screens, and a subtle press-down
+(`scale(0.97)`) on button `:active` for tactile feedback. The two new
+primary "start" actions get their own larger, icon-forward tile style
+(`.start-button`) distinct from ordinary buttons, and the new
+secondary code-path link gets a plain-text `.link-button` style with
+no border/background, so visual weight matches actual priority (see
+the flow-flattening entry above).
+
+**Verified visually**, not just by code review: screenshotted the
+start screen in both light and dark `prefers-color-scheme`
+contexts via Playwright. The first dark-mode attempt looked broken
+(everything near-invisible) — turned out to be the test itself taking
+the screenshot mid-flight during the 200ms fade-in animation, not a
+real rendering bug; waiting for the animation to settle before
+screenshotting showed the actual clean, high-contrast result. Kept as
+a reminder in this entry because it's an easy trap: a fast automated
+screenshot isn't the same as how a human perceives a brief CSS
+transition.
+
+## Receiver "Open" link for Blob-fallback saves
+
+**What:** requested by the user, prompted by receiving photos and
+wanting to view them without digging through the Downloads folder.
+`file-writer.js`'s Blob-mode sink (used on browsers without the File
+System Access API, or when a user skips/cancels its picker) now
+exposes `getPreviewUrl()`, returning the `Blob` object URL it already
+creates internally to trigger the automatic download. `transfer-ui.js`
+shows an "Open" link next to a completed file's row whenever that URL
+is available, opening it in a new tab (`target="_blank"`) — for an
+image, this just displays it; for other types, the browser's own
+handling takes over (e.g. a PDF viewer).
+
+**Why only for Blob-mode, not File System Access saves:** an FSA save
+already went to a location the *user themselves* picked via the native
+save dialog — they always have their own way back to it. A Blob-mode
+download's destination is whatever the browser's own download manager
+decides (typically a fixed Downloads folder the user didn't choose per-
+file), which is exactly the "tempting to want a more direct way back
+to it" gap the user described. Re-deriving a preview this way for FSA
+saves would need reading the just-written file back into memory, which
+would defeat the point of using FSA for a large file in the first
+place; Blob-mode files are implicitly small enough to have been
+memory-resident already (see `BLOB_FALLBACK_WARN_BYTES`), so exposing
+that already-created object URL costs nothing extra.
+
+**Why the URL lives for 10 minutes, not the previous 30 seconds:** the
+old 30-second auto-revoke was tuned only for "give the download click
+time to actually start," before any UI ever offered a reason to revisit
+the URL afterward. Now that clicking "Open" *later* is an expected
+interaction, revoking too eagerly would silently 404 a link the user
+is looking right at. 10 minutes is generous enough to not matter in
+practice while still eventually freeing memory in a long-running
+session that receives many files.
+
+**Verified** end-to-end with Playwright: paired two real pages, sent
+an actual (minimal but valid) PNG, confirmed the "Open" link appears
+pointing at a `blob:` URL once the transfer completes, clicked it, and
+confirmed the resulting new tab actually renders an `<img>` — not just
+that a link with the right href exists, but that the browser genuinely
+treats it as a displayable image.

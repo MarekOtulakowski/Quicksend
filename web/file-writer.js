@@ -11,6 +11,14 @@
  * memory at once; callers should warn the user before proceeding. */
 export const BLOB_FALLBACK_WARN_BYTES = 200 * 1024 * 1024;
 
+/** How long a Blob-mode sink's preview URL (see createFileSink's
+ * getPreviewUrl) stays valid before being revoked automatically.
+ * Generous enough that a user has time to notice and click "Open"
+ * without worrying about a race, while still eventually freeing the
+ * memory rather than holding every received file for the rest of the
+ * page's life. */
+const PREVIEW_URL_LIFETIME_MS = 10 * 60 * 1000;
+
 export function hasFileSystemAccess() {
   return typeof window.showSaveFilePicker === "function";
 }
@@ -39,8 +47,14 @@ export async function chooseSaveDirectory() {
 
 /**
  * Creates a sink for one incoming file. Returns
- * { write(chunk), close(), abort(), mode: "fsa"|"blob" }.
- * write/close/abort all return Promises.
+ * { write(chunk), close(), abort(), mode: "fsa"|"blob", getPreviewUrl }.
+ * write/close/abort all return Promises. getPreviewUrl() returns null
+ * except in "blob" mode after close() resolves, where it returns an
+ * object URL the caller can offer as an "Open" link — the file went
+ * straight to the browser's downloads, so unlike the FSA modes (which
+ * write to a location the user picked and can navigate back to
+ * themselves) there's otherwise no way back to it without digging
+ * through the downloads list.
  *
  * If dirHandle (a FileSystemDirectoryHandle from chooseSaveDirectory)
  * is given, the file is created directly inside it — no dialog at
@@ -57,6 +71,7 @@ export async function createFileSink(name, mime, dirHandle) {
         write: (chunk) => writable.write(chunk),
         close: () => writable.close(),
         abort: () => writable.abort(),
+        getPreviewUrl: () => null,
       };
     } catch {
       // e.g. a name the filesystem rejects, or permission revoked
@@ -74,6 +89,7 @@ export async function createFileSink(name, mime, dirHandle) {
         write: (chunk) => writable.write(chunk),
         close: () => writable.close(),
         abort: () => writable.abort(),
+        getPreviewUrl: () => null,
       };
     } catch {
       // Picker cancelled, or FSA otherwise unavailable at runtime —
@@ -84,6 +100,7 @@ export async function createFileSink(name, mime, dirHandle) {
   }
 
   const parts = [];
+  let previewUrl = null;
   return {
     mode: "blob",
     write: (chunk) => {
@@ -92,19 +109,27 @@ export async function createFileSink(name, mime, dirHandle) {
     },
     close: () => {
       const blob = new Blob(parts, { type: mime || "application/octet-stream" });
-      const url = URL.createObjectURL(blob);
+      previewUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
+      a.href = previewUrl;
       a.download = name;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      setTimeout(() => {
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        previewUrl = null;
+      }, PREVIEW_URL_LIFETIME_MS);
       return Promise.resolve();
     },
     abort: () => {
       parts.length = 0;
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+        previewUrl = null;
+      }
       return Promise.resolve();
     },
+    getPreviewUrl: () => previewUrl,
   };
 }

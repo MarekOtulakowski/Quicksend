@@ -46,13 +46,25 @@ function createFileRow(list, name, size) {
   cancelBtn.textContent = t("cancelButton");
   cancelBtn.hidden = true;
 
+  // Only ever shown for a received file saved via the Blob fallback
+  // (see file-writer.js's getPreviewUrl) — a save via the File System
+  // Access API already went to a location the user picked themselves,
+  // so there's nothing this would add there.
+  const openLink = document.createElement("a");
+  openLink.className = "file-open";
+  openLink.textContent = t("openFileLink");
+  openLink.target = "_blank";
+  openLink.rel = "noopener";
+  openLink.hidden = true;
+
   li.appendChild(nameEl);
   li.appendChild(progressEl);
   li.appendChild(statusEl);
+  li.appendChild(openLink);
   li.appendChild(cancelBtn);
   list.appendChild(li);
 
-  return { progressEl, statusEl, cancelBtn };
+  return { progressEl, statusEl, cancelBtn, openLink };
 }
 
 /**
@@ -277,6 +289,11 @@ function renderReceiverTransfer(container, socket, epochKey) {
       await row.sink.close();
       row.progressEl.value = 100;
       row.statusEl.textContent = row.sink.mode === "fsa" ? t("transferSavedToDisk") : t("transferDownloaded");
+      const previewUrl = row.sink.getPreviewUrl();
+      if (previewUrl) {
+        row.openLink.href = previewUrl;
+        row.openLink.hidden = false;
+      }
     },
     onAborted: ({ fileId, reason }) => {
       receiving = false;
