@@ -680,13 +680,17 @@ function renderPaired(container) {
   swapStatusEl.hidden = true;
   container.appendChild(swapStatusEl);
 
+  // Grouped with the other paired-session-level actions, above the
+  // transfer UI, so it stays visible without scrolling once a file
+  // list grows long — it was previously placed after the transfer UI
+  // and users couldn't find it (see docs/DECISIONS.md).
+  container.appendChild(button(t("disconnectButton"), () => disconnectSession(container), "danger-button"));
+
   const transferRoot = document.createElement("div");
   container.appendChild(transferRoot);
   renderTransferUI(transferRoot, getPairedSession()).then((handle) => {
     activeTransferHandle = handle;
   });
-
-  container.appendChild(button(t("disconnectButton"), () => disconnectSession(container), "danger-button"));
 }
 
 /** Manually ends the session on request — the escape hatch for when a

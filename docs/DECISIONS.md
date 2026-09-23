@@ -1241,3 +1241,19 @@ clicked the new Disconnect button on one side, confirmed it returns to
 the start screen locally and that the other side lands on the error
 screen with the correct "The other device ended the session." text
 (not the old generic "didn't come back in time" message).
+
+**Status: fixed, then found undiscoverable, then fixed again.** The
+Android reconnect-window fix above resolved the original transfer bug
+(confirmed by the user on real Android and iPhone). Separately, the
+user asked where the Disconnect button was — it had been appended
+*after* the transfer UI (file list / drop zone), so on any screen
+with content below the fold it was invisible without scrolling, and
+its flat/borderless `.link-button`-style styling made it easy to miss
+even when visible, since it read as plain text next to the
+normal-weight "Swap roles" button rather than as a control. Moved it
+to right after "Swap roles" (grouped with the other session-level
+actions, above the transfer UI so file-list length can't push it out
+of view) and restyled it as an ordinary bordered button tinted with
+the danger color, instead of the flat link style — confirmed visually
+via a fresh screenshot that it's now immediately visible, unmissable,
+and self-evidently clickable right below "Swap roles".

@@ -248,22 +248,16 @@ button.link-button:hover {
   text-decoration: underline;
 }
 
-/* The manual "end session" escape hatch on the paired screen — kept
- * visually de-emphasized like .link-button (it's rarely needed, and
- * shouldn't compete with "swap roles" for attention), but tinted with
- * the danger color so it still reads as an exit/destructive action. */
+/* The manual "end session" escape hatch on the paired screen. Was
+ * originally styled flat/borderless like .link-button, but next to a
+ * normal-weight "swap roles" button that made it read as plain text
+ * rather than something clickable — users couldn't find it (see
+ * docs/DECISIONS.md). Keeps the ordinary button shape/weight so it's
+ * obviously a control, just tinted with the danger color to still
+ * read as an exit/destructive action rather than a primary one. */
 button.danger-button {
-  background: none;
-  border: none;
-  box-shadow: none;
   color: var(--danger);
-  font-size: 0.9rem;
-  padding: 0.4rem;
-}
-
-button.danger-button:hover {
-  box-shadow: none;
-  text-decoration: underline;
+  border-color: var(--danger);
 }
 
 .qr-canvas {
