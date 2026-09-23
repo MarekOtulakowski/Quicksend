@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -23,6 +24,15 @@ import (
 // transfer.js's CHUNK_SIZE, 256KiB) plus its framing overhead and
 // AES-GCM tag, with headroom to spare.
 const maxMessageSize = 1 << 20 // 1MiB
+
+// pingInterval/pingTimeout control the keepalive ping loop (see
+// pingLoop) that runs for the lifetime of a paired connection. Vars,
+// not consts, so tests can shorten them instead of waiting out the
+// real 20s/10s.
+var (
+	pingInterval = 20 * time.Second
+	pingTimeout  = 10 * time.Second
+)
 
 type handler struct {
 	hub *session.Hub
@@ -73,6 +83,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pingCtx, cancelPing := context.WithCancel(context.Background())
+	defer cancelPing()
+	go pingLoop(pingCtx, c)
+
 	endedExplicitly := false
 	defer func() {
 		if !endedExplicitly {
@@ -100,6 +114,41 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.hub.Relay(ctx, sess, role, binary, data)
+	}
+}
+
+// pingLoop periodically pings the peer for the lifetime of ctx, to
+// keep the underlying connection alive across NATs/middleboxes that
+// silently drop a TCP connection that looks idle — a mobile carrier's
+// NAT in particular, which a long quiet stretch (e.g. the sender
+// reading a large cloud-backed photo, or either side just sitting
+// paired with nothing to send) can trip well before either endpoint
+// would otherwise notice anything wrong. See docs/DECISIONS.md.
+//
+// It also gives the relay a bounded way to detect a truly dead
+// connection: raw.Read in ServeHTTP's main loop is called with
+// context.Background(), so with no ping it could block forever on a
+// connection a NAT has silently dropped with neither a FIN nor an
+// RST. A ping that never gets its pong closes the connection, which
+// unblocks that Read with an error and runs the normal disconnect
+// path (HandleDisconnect -> notifies the other peer via
+// peer_disconnected).
+func pingLoop(ctx context.Context, c *conn) {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
+			err := c.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				_ = c.Close("ping timeout")
+				return
+			}
+		}
 	}
 }
 

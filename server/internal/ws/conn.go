@@ -45,6 +45,19 @@ func (c *conn) Send(ctx context.Context, binary bool, data []byte) error {
 	return c.raw.Write(writeCtx, typ, data)
 }
 
+// Ping sends a WebSocket ping and waits for the peer's pong (answered
+// automatically by any spec-compliant client, including every
+// browser — no application code needed on the other end). Per
+// coder/websocket's docs, Ping relies on a concurrently-running Read
+// loop to actually observe the pong frame; ServeHTTP's blocking read
+// loop provides that. Held behind the same mutex as Send/Close since
+// the underlying connection has no concurrent-writer support.
+func (c *conn) Ping(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.raw.Ping(ctx)
+}
+
 // Close implements session.Conn. Safe to call more than once.
 func (c *conn) Close(reason string) error {
 	c.closeOnce.Do(func() {

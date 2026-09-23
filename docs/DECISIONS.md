@@ -1335,3 +1335,126 @@ really is what's failing there, the receiver should now show the
 "Canceled" state instead of hanging; if it still hangs, the failure
 must be happening somewhere else entirely (e.g. the whole session
 actually dying, not just this one file), which would need revisiting.
+
+**Status: confirmed still hanging** — the user redeployed (this time
+onto a genuinely fresh, uncached origin — see the Cloudflare caching
+entry below) and the receiver still sat on "Waiting for files…"
+forever. That rules out a thrown file-read exception as the cause
+(the new `file_abort` notify would have fired). Investigation
+continued below with two real, independent fixes.
+
+## Cloudflare's proxy caching pairing.js/styles.css for 4 hours, silently
+
+**What:** after redeploying, neither the user nor a direct `curl`
+could see any code change take effect — the live site kept serving
+JS/CSS from *before* the deploy. `curl -sI https://qs.makoff.ovh/pairing.js`
+showed `cache-control: max-age=14400` (4h) and `cf-cache-status: HIT`.
+`http.FileServer` (`server/cmd/quicksend/main.go`) sends no
+`Cache-Control` header at all, so this was entirely Cloudflare's own
+default caching behavior for the domain's proxied (orange-cloud) DNS
+record — its default edge+browser cache for static file extensions
+like `.js`/`.css`, applied because the origin left the door open by
+not specifying anything itself. Every deploy updated the origin
+correctly the whole time; Cloudflare (and every visitor's browser)
+just kept serving whatever they'd already cached for up to 4 hours
+regardless.
+
+**Fix:** added a small `noCache` middleware in `main.go` wrapping the
+static file handler, setting `Cache-Control: no-cache` on every
+response — forces a conditional revalidation on every request rather
+than blind caching, which `http.FileServer`'s built-in ETag/Last-
+Modified support already answers with a cheap 304 when nothing
+changed. This only prevents the problem *going forward*; Cloudflare's
+existing cached copies needed a manual "Purge Everything" from the
+user to actually clear.
+
+**The user also switched the DNS record to "DNS only" (grey cloud)**
+entirely, removing Cloudflare's proxy from the path altogether — this
+domain never needed anything from Cloudflare's proxy/CDN layer, only
+its DNS API (for the DNS-01 ACME challenge, which is unaffected by
+proxy status either way). This is now the *second* Cloudflare-proxy-
+specific bug hit today (after the HTTP/3 investigation above), and
+removing the proxy removes the whole category rather than fixing
+symptoms one at a time.
+
+**A real trap hit while diagnosing this**: switching proxy status
+changes the DNS record's *answer* (from Cloudflare's anycast IPs to
+the origin's real IP), and that change takes a little while to
+propagate through intermediate caching resolvers even though
+Cloudflare's own authoritative nameservers answer correctly right
+away. Querying `1.1.1.1` even shortly after the toggle still returned
+stale (proxied) answers, which looked exactly like "the change didn't
+take" until querying the zone's authoritative nameservers directly
+(`dig qs.makoff.ovh @kelly.ns.cloudflare.com`) and connecting straight
+to the real origin IP with `curl --resolve` (bypassing DNS entirely)
+both confirmed the change *had* taken effect at the source — it just
+hadn't reached every resolver yet. Worth remembering next time a DNS
+change "isn't working": check the authoritative source directly before
+concluding the change itself was wrong.
+
+## Missing keepalive + unhandled `peer_disconnected` were the real cause
+
+**What:** with caching ruled out as a confound, the Google Photos send
+still hung the receiver forever with zero indication anything was
+wrong. Two real, independent gaps compounded into this:
+
+1. **No WebSocket ping/pong anywhere** (confirmed earlier via
+   `grep -rn "Ping\|Pong\|SetReadDeadline" server/internal/ws
+   server/internal/session` — zero matches). `ServeHTTP`'s main read
+   loop (`server/internal/ws/handler.go`) calls `raw.Read(ctx)` with
+   `ctx := context.Background()` — no deadline at all — so a
+   connection a mobile carrier's NAT silently drops (no FIN, no RST,
+   just stops forwarding packets) could block that Read forever, with
+   neither side ever finding out. A long quiet stretch is exactly what
+   reading a Google Photos original needing an on-demand cloud
+   download produces — no chunks go out while that read is pending —
+   which plausibly explains why a fresh camera photo (small, already
+   local, read instantly) worked while a Google Photos pick (needs a
+   slow fetch first) didn't: NATs commonly time out an idle-looking
+   TCP mapping well under a minute, especially on cellular, and WiFi
+   routers' NAT tables are typically far more lenient — matching why
+   this was never seen from an iPhone.
+2. **The client never handled `peer_disconnected`** (relay → remaining
+   peer when the *other* side's connection drops — see
+   `docs/PROTOCOL.md`). `grep -rn "peer_disconnected" web/` returned
+   nothing before this fix. So even on the rare occasion the relay
+   *did* correctly notice and report a dropped peer, the surviving
+   side's UI had no code path reacting to it at all — a receiver mid-
+   file just sat on "Waiting for files…" indefinitely no matter what
+   actually killed the sender's connection, independent of cause #1.
+
+**Fix, part 1 (server, `server/internal/ws/{conn,handler}.go`):** added
+a `Ping` method to `conn` (serialized behind the same mutex as
+`Send`/`Close`, since the underlying connection has no concurrent-
+writer support) and a `pingLoop` goroutine started for the lifetime of
+every paired connection, sending a ping every 20s (10s timeout to get
+the pong back). Browsers answer WebSocket pings automatically with no
+application code needed, so this needs zero client-side changes to
+work — it just generates enough periodic real traffic to keep NAT
+mappings alive, and a ping that never gets its pong actively closes
+the connection, unblocking the otherwise-undead-lockable `raw.Read`
+and running the existing disconnect path. `pingInterval`/`pingTimeout`
+are vars, not consts, so `TestKeepalivePingsDontDisconnectAResponsiveClient`
+(`handler_test.go`) can shorten them instead of a 20-second test.
+
+**Fix, part 2 (client, `web/pairing.js`):** `wirePairedSocket` now
+handles `peer_disconnected` by showing the same "reconnecting…" status
+text/element `attemptReconnect` already uses for the symmetric case (a
+peer's own socket dropping) — accurate wording from either
+perspective, and naturally cleared the moment a fresh `render()` runs
+for `peer_reconnected` or `session_ended`.
+
+**Verified:** the new Go test dials a real client against a real
+`httptest.Server`, running its own background read loop (mirroring
+what a real browser's WebSocket stack does automatically) to prove a
+genuinely responsive peer survives many ping cycles unaffected;
+`go test -race ./...` and the full `node --test web/*.test.mjs` suite
+both pass. End-to-end with Playwright: paired two real pages, closed
+the sender's browser context outright (an abrupt drop, not the app's
+own clean `end_session`), confirmed the receiver's page now shows
+"Connection lost, trying to reconnect…" instead of nothing. Not yet
+confirmed against the actual Google Photos scenario on a real Android
+device — needs the user to redeploy and retest; if it still fails, the
+next step is the server-side logging identified earlier (the discarded
+read error in `handler.go`'s relay loop) since guessing further without
+real evidence from a reproduction has had a poor hit rate today.

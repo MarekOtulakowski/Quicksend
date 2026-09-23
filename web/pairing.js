@@ -790,7 +790,23 @@ function wirePairedSocket(container, socket) {
       // would always show the same generic text regardless of why the
       // session actually ended.
       setState(container, { screen: "error", code: (env.payload && env.payload.reason) || "session_ended" });
+    } else if (env.type === "peer_disconnected") {
+      // The *other* side's connection dropped — ours is still fine.
+      // Without this, a transfer in progress at that moment (the
+      // receiver mid-file, or the sender about to send the next
+      // chunk) just silently stops with no explanation: sendFile/
+      // attachReceiver only notice their *own* socket closing, not a
+      // peer_disconnected relayed about someone else's. Reusing the
+      // same "reconnecting" wording/element as attemptReconnect below
+      // since it's accurate from either side's perspective, and it's
+      // replaced by a fresh render the moment peer_reconnected (or
+      // session_ended, if they don't come back) arrives.
+      showReconnectStatus(t("reconnecting"));
     } else if (env.type === "peer_reconnected") {
+      // The fresh render() below clears the container (see its own
+      // implementation), which discards whatever "reconnecting..."
+      // status the peer_disconnected branch above may have shown —
+      // no separate clear needed here.
       currentState = { ...currentState, epoch: currentState.epoch + 1 };
       render(container);
     } else if (env.type === "role_swap_request") {

@@ -275,3 +275,52 @@ func TestPeerDisconnectNotifiesOtherSide(t *testing.T) {
 		t.Fatalf("guest got %s, want peer_disconnected", env.Type)
 	}
 }
+
+// TestKeepalivePingsDontDisconnectAResponsiveClient guards against the
+// most likely way to get the keepalive ping loop (added after a real
+// mobile network was silently dropping idle-looking connections — see
+// docs/DECISIONS.md) wrong: accidentally disconnecting a perfectly
+// healthy peer. A real browser always has an internal read pump
+// answering pings automatically regardless of what application code
+// is doing; this test's client simulates that with its own background
+// reader, since coder/websocket only answers a ping during an active
+// Read call (see its Ping docs) — without this goroutine, the test
+// client just wouldn't reply and would falsely appear dead.
+//
+// It does not attempt to verify the reverse (an unresponsive peer
+// actually gets disconnected) — reliably simulating "stops responding
+// mid-connection" at the wire level from a test would need low-level
+// socket manipulation that's disproportionate to what this loop does
+// (send a ping, close on failure); that half is exercised by the ping
+// timeout/close logic being a straightforward two-line error check.
+func TestKeepalivePingsDontDisconnectAResponsiveClient(t *testing.T) {
+	oldInterval, oldTimeout := pingInterval, pingTimeout
+	pingInterval, pingTimeout = 30*time.Millisecond, 100*time.Millisecond
+	t.Cleanup(func() { pingInterval, pingTimeout = oldInterval, oldTimeout })
+
+	srv, _ := testServer(t)
+	url := wsURL(srv.URL)
+	host := dial(t, url)
+
+	done := make(chan struct{})
+	t.Cleanup(func() { <-done })
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := host.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+
+	send(t, host, proto.TypeCreateSession, nil)
+
+	// Several ping cycles' worth of real time: if the loop were
+	// mistakenly closing a responsive connection, sending anything
+	// after this would fail.
+	time.Sleep(20 * pingInterval)
+
+	if err := host.Write(context.Background(), websocket.MessageText, []byte(`{"type":"end_session"}`)); err != nil {
+		t.Fatalf("connection was closed despite responding to every ping: %v", err)
+	}
+}
