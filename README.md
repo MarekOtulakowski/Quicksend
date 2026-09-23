@@ -206,6 +206,15 @@ situation.
   as a download — fine for photos, potentially painful for very large
   files. See the size warning shown in the UI when this fallback is
   used.
+- **Picking a file from the Google Photos app on Android** can
+  disconnect the sender: opening it backgrounds the browser tab for
+  long enough that Android/Chrome's own resource management can close
+  the WebSocket outright — a platform limitation, not something an app
+  in the page can prevent (see docs/DECISIONS.md). The app recovers
+  gracefully (reconnects, or shows a clear error) rather than hanging,
+  but the send itself needs retrying. Picking from the device's local
+  gallery instead avoids this entirely; for a Google-Photos-only file,
+  download it to the device first.
 - See "Not yet implemented" above for missing features.
 
 ## Development

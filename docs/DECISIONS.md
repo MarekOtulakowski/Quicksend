@@ -1591,3 +1591,56 @@ that this reproduces the bug on the pre-fix code (the stale input's
 `disabled` state gets stuck `true` forever — the hang) and is fixed
 afterward (`disabled` returns to `false` immediately, no hang), with
 the fresh input still working normally throughout.
+
+## Conclusion: Android backgrounding Chrome for Google Photos is a platform limit, not a Quicksend bug
+
+**What settled it:** redeployed with the stale-input fix (confirmed
+live — the Disconnect button was visible, ruling out stale JS this
+time) and reproduced again. The exact same raw `ws read error` /
+`"failed to get reader: failed to read frame header: EOF"` still
+happened, twice for the same session 62 seconds apart (long enough
+that a reconnect must have briefly succeeded in between, then died
+again) — always role 1 (the sender), always tied to Google Photos.
+Combined with everything gathered this session:
+- A fresh camera photo: works, every time.
+- A local-gallery photo (confirmed on this exact rebuilt image):
+  works.
+- A Google Photos cloud photo: fails.
+- A screenshot picked *from inside* Google Photos (always local,
+  never needs a network fetch): fails identically.
+
+The common factor isn't file size, cloud downloads, or stale
+JavaScript — it's specifically opening the Google Photos app itself,
+regardless of what gets picked once inside it. That points at
+Android/Chrome backgrounding this tab for long enough, while a
+heavier foreground app (Google Photos, doing its own sync/indexing/
+memory use) is active, to have the browser or OS reclaim the
+backgrounded tab's network resources — closing the WebSocket outright,
+with no close handshake (a raw EOF, matching every log line seen).
+The native gallery/"Recent" picker is lighter-weight and faster to
+use, which is consistent with it never triggering this.
+
+**Why this can't be fixed in Quicksend's own code**: a WebSocket
+belongs to the page/document context; there's no API (Service Worker
+or otherwise) that can keep one open while its page is backgrounded
+and reclaimed by the OS — by design, this is the browser's own
+resource-management behavior, the same one documented by Chrome's
+Page Lifecycle API for tab freezing. The four fixes made while
+investigating this (the reconnect window, `peer_disconnected` handling,
+the keepalive ping, the stale-input hang) don't prevent the
+underlying disconnect — nothing can, from inside the page — but they
+do make recovering from it graceful instead of hanging or leaving the
+other side confused, which is the most that's achievable here.
+
+**Practical mitigation** (confirmed by the user's own successful
+local-gallery test): use the device's local gallery/"Recent" picker
+instead of opening the Google Photos app directly. For a photo that
+only exists in Google Photos, download it to the device first (Google
+Photos' own "Download" action) before opening Quicksend, then pick it
+from the now-fast local gallery.
+
+**This investigation is closed** as a documented, understood platform
+constraint rather than an open bug. If a *different* Android disconnect
+pattern shows up later (a different error, not tied to switching to a
+heavy foreground app), it should get its own fresh investigation
+rather than being folded into this one.
