@@ -65,19 +65,26 @@ curl -fsSL -o caddy/Dockerfile https://raw.githubusercontent.com/MarekOtulakowsk
 curl -fsSL -o .env.example https://raw.githubusercontent.com/MarekOtulakowski/Quicksend/main/.env.example
 ```
 
-### 3. Configure
+### 3. Point the domain at this server
+
+In Cloudflare's DNS settings, add (or edit) an A record for your domain pointing at this server's public IP, with the proxy status set to **DNS only** (grey cloud) — not Proxied. Proxying it isn't wrong exactly, but it puts Cloudflare's own caching and protocol negotiation in front of what's otherwise a single long-lived WebSocket per session, and it's not needed for anything here: the DNS-01 challenge below only ever talks to Cloudflare's API, never the proxied traffic path.
+
+### 4. Configure
 
 ```bash
 cp .env.example .env
 ```
 
 Edit `.env`:
-- `QUICKSEND_DOMAIN` — your domain (its DNS must be on Cloudflare)
+- `QUICKSEND_DOMAIN` — the domain from step 3
 - `CLOUDFLARE_API_TOKEN` — a token scoped to just that zone with "Zone / DNS / Edit" permission (create one at [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens), the "Edit zone DNS" template) — **never your account's Global API Key**, which can edit every zone
 
-### 4. Start it
+### 5. Open port 443 and start it
+
+If the host has a firewall enabled (e.g. `ufw`), allow 443 — port 80 is never needed:
 
 ```bash
+sudo ufw allow 443/tcp   # skip if you don't use ufw, or 443 is already open
 docker compose up -d
 ```
 
@@ -99,7 +106,6 @@ All limits are environment variables on the `quicksend` service:
 
 ## Notes
 
-- If your DNS is on Cloudflare, keep the domain **DNS only** (grey cloud), not proxied — Quicksend holds a long-lived WebSocket per session, and a proxied record adds a second layer (caching, protocol negotiation) that can cause real headaches for that kind of connection for no real benefit on a single small relay.
 - The relay never sees plaintext file content, filenames, or encryption keys — architecturally, not just by policy. See the source for exactly what it does parse (a small allowlist of control messages).
 - **No independent security audit.** A carefully-built tool for a self-hosting-aware user, not a verified solution for high-stakes secrets.
 - Multi-arch image: `linux/amd64` + `linux/arm64`.
