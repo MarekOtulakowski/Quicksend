@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"sync"
 	"time"
@@ -325,7 +326,15 @@ func (h *Hub) Relay(ctx context.Context, s *Session, role Role, binary bool, dat
 	if other == nil {
 		return false
 	}
-	_ = other.Send(ctx, binary, data)
+	if err := other.Send(ctx, binary, data); err != nil {
+		// A write to the *other* peer failing (their connection is
+		// stalled or already gone) previously vanished silently — the
+		// sender's own Send/Read kept working fine, so nothing about
+		// this was visible anywhere. Surfacing it is the difference
+		// between "a chunk quietly never arrived" and being able to
+		// tell why from the logs. See docs/DECISIONS.md.
+		slog.Warn("relay write to peer failed", "session", s.ID, "from_role", role, "error", err)
+	}
 	return true
 }
 
@@ -354,6 +363,7 @@ func (h *Hub) abortOversizedFile(ctx context.Context, s *Session, fileID [16]byt
 // EndSession tears the session down immediately by explicit request
 // from byRole, notifying and closing the other peer's connection.
 func (h *Hub) EndSession(ctx context.Context, s *Session, byRole Role) {
+	slog.Info("session ended explicitly", "session", s.ID, "by_role", byRole)
 	otherConn, otherIP := s.connAndIP(byRole.other())
 	if otherConn != nil {
 		sendEnvelope(ctx, otherConn, proto.TypeSessionEnded, proto.SessionEndedPayload{Reason: proto.ReasonEndedByPeer})
@@ -368,6 +378,7 @@ func (h *Hub) EndSession(ctx context.Context, s *Session, byRole Role) {
 // period; Run's background reaper finishes tearing it down if nobody
 // reconnects in time.
 func (h *Hub) HandleDisconnect(ctx context.Context, s *Session, role Role) {
+	slog.Info("peer disconnected", "session", s.ID, "role", role)
 	now := h.now()
 	other, ip := s.markDisconnected(role, now)
 
@@ -436,6 +447,7 @@ func (h *Hub) reapSession(s *Session, now time.Time) {
 	ctx := context.Background()
 
 	notifyAndClose := func(reason string) {
+		slog.Info("session reaped", "session", s.ID, "reason", reason)
 		if snap.hostConn != nil {
 			sendEnvelope(ctx, snap.hostConn, proto.TypeSessionEnded, proto.SessionEndedPayload{Reason: reason})
 			h.closeAndRelease(snap.hostConn, snap.hostIP, reason)

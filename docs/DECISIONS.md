@@ -1458,3 +1458,55 @@ device — needs the user to redeploy and retest; if it still fails, the
 next step is the server-side logging identified earlier (the discarded
 read error in `handler.go`'s relay loop) since guessing further without
 real evidence from a reproduction has had a poor hit rate today.
+
+**Status: confirmed still broken** — redeployed onto a verified-fresh
+origin (`curl` confirmed the new code and `Cache-Control: no-cache`
+were actually live, ruling out caching as a confound again) and the
+Google Photos send hung exactly the same way. Four independent, real
+bugs have now been found and fixed while chasing this (HTTP/3, the
+short reconnect window, the un-notified receiver, the missing
+keepalive/`peer_disconnected` handling) without the core symptom
+budging — worth fixing regardless, but none of them was *the* cause.
+Continuing to guess a fifth theory blind isn't working; see below.
+
+## Adding real server-side logging instead of guessing further
+
+**What:** before this, the relay logged almost nothing — one line at
+startup and one on a WebSocket accept failure; every disconnect,
+read error, and relay write failure was silently discarded (see the
+Explore agent's findings a few entries up, which this finally acts
+on). Added:
+- `server/internal/ws/handler.go`'s `logReadError`: classifies why the
+  main read loop ended — a normal/expected close logs at Info, an
+  abnormal close code or a plain read error (no close frame at all —
+  a timeout, a reset) logs at Warn — tagged with the session ID and
+  role so it's correlatable with a user's "it happened around X"
+  report.
+- `pingLoop` logs a Warn when a ping times out and it force-closes the
+  connection, so the logs can distinguish "we killed it because it
+  stopped answering" from any other kind of closure.
+- `server/internal/session/hub.go`: `HandleDisconnect`, `EndSession`,
+  and `reapSession`'s `notifyAndClose` now log at Info (session ID,
+  role, and — for a reap — the specific reason:
+  `inactivity_timeout`/`peer_timeout`), giving a full session lifecycle
+  timeline instead of just its start.
+- `Relay`'s previously-discarded write-to-the-other-peer error now
+  logs at Warn — the "receiver stalled, the write timed out, the chunk
+  just vanished" case identified earlier as a possible silent-failure
+  path, now visible instead of invisible.
+
+**Verified:** `go test -race ./...` and `node --test web/*.test.mjs`
+both still pass; a real pairing + abrupt-disconnect run (closing one
+side's browser context outright, the same Playwright scenario used to
+verify `peer_disconnected` above) now produces a clear, readable log
+timeline: `ws closed` (close_status 1001) immediately followed by
+`peer disconnected`, for each side, with the session ID matching
+across both lines.
+
+**Next step is now genuinely evidence-driven**: ask the user to
+redeploy this, reproduce the Google Photos failure once more, and send
+`docker compose logs quicksend` from around that time. Whatever it
+actually says — a specific close status, a read error with a message,
+a ping timeout, a relay write failure, or (if truly nothing logs)
+confirmation the failure is client-side only — replaces every
+remaining guess in this document with a fact.

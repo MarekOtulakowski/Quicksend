@@ -85,7 +85,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	pingCtx, cancelPing := context.WithCancel(context.Background())
 	defer cancelPing()
-	go pingLoop(pingCtx, c)
+	go pingLoop(pingCtx, c, sess.ID, role)
 
 	endedExplicitly := false
 	defer func() {
@@ -97,6 +97,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for {
 		typ, data, err := raw.Read(ctx)
 		if err != nil {
+			logReadError(sess.ID, role, err)
 			return
 		}
 
@@ -133,7 +134,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // unblocks that Read with an error and runs the normal disconnect
 // path (HandleDisconnect -> notifies the other peer via
 // peer_disconnected).
-func pingLoop(ctx context.Context, c *conn) {
+func pingLoop(ctx context.Context, c *conn, sessionID string, role session.Role) {
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 	for {
@@ -145,11 +146,34 @@ func pingLoop(ctx context.Context, c *conn) {
 			err := c.Ping(pingCtx)
 			cancel()
 			if err != nil {
+				slog.Warn("ws ping timed out, closing connection", "session", sessionID, "role", role, "error", err)
 				_ = c.Close("ping timeout")
 				return
 			}
 		}
 	}
+}
+
+// logReadError classifies why a paired connection's read loop ended.
+// Previously this error was discarded entirely (the loop just
+// returned), leaving real-world disconnects — which mobile networks
+// in particular produce for all sorts of different reasons — totally
+// invisible in the logs. A normal/expected close (the client going
+// away cleanly, e.g. via end_session or the tab closing) logs at Info;
+// anything else — an abnormal close code, or no close frame at all
+// (a read timeout, a reset, the ping loop's own forced close) — logs
+// at Warn so it stands out when correlating a user's bug report
+// against the timestamp in these logs. See docs/DECISIONS.md.
+func logReadError(sessionID string, role session.Role, err error) {
+	if status := websocket.CloseStatus(err); status != -1 {
+		if status == websocket.StatusNormalClosure || status == websocket.StatusGoingAway {
+			slog.Info("ws closed", "session", sessionID, "role", role, "close_status", status)
+			return
+		}
+		slog.Warn("ws closed abnormally", "session", sessionID, "role", role, "close_status", status, "error", err)
+		return
+	}
+	slog.Warn("ws read error", "session", sessionID, "role", role, "error", err)
 }
 
 // handleReconnectToken registers the bearer token role's peer just
