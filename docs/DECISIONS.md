@@ -1116,3 +1116,47 @@ pointing at a `blob:` URL once the transfer completes, clicked it, and
 confirmed the resulting new tab actually renders an `<img>` — not just
 that a link with the right href exists, but that the browser genuinely
 treats it as a displayable image.
+
+## Disabling HTTP/3 on the production Caddy: Android sends were dying mid-transfer
+
+**What:** real-device testing on the deployed VPS found sending from
+an Android phone (Chrome) reliably died partway through a transfer —
+even a small (<5MB) file, ruling out any duration-based timeout —
+while the identical flow from an iPhone (Safari) always completed.
+Caddy's default config enables HTTP/3 (`"protocols":["h1","h2","h3"]`
+in its startup log), which is QUIC running over UDP. Added
+`protocols h1 h2` to disable it, as a `servers` block under the
+Caddyfile's global options (not a per-site directive — `caddy
+validate` rejects `protocols` written directly inside the site block
+with "unrecognized directive"; the underlying listener is shared even
+though this deployment only has one site).
+
+**Why this is the likely cause:** QUIC/UDP is materially less
+reliable than TCP across mobile-carrier NATs and middleboxes — packets
+get silently dropped mid-connection on some networks in a way TCP's
+own retransmission and congestion control don't experience, since
+carrier-grade NAT and DPI boxes are far more mature and permissive for
+plain TCP:443 than for arbitrary UDP:443 traffic. Chrome on Android
+opportunistically upgrades to HTTP/3 far more aggressively than iOS
+Safari once a server advertises it via `Alt-Svc` (including for the
+WebSocket transport itself, via RFC 9220 WebSocket-over-HTTP/3) —
+which lines up exactly with the platform split observed: same relay,
+same client code, only the transport negotiation differs by browser.
+
+**Why h1+h2 instead of trying to keep h3 working:** there's no real
+benefit to HTTP/3 for this app — it's a single small WebSocket
+connection per session, not a page with dozens of parallel requests
+where QUIC's head-of-line-blocking avoidance would matter. Reliability
+across arbitrary mobile networks matters far more here than the
+marginal latency win HTTP/3 offers, so removing the failure mode
+entirely was preferred over trying to debug QUIC behavior on carrier
+networks that aren't reproducible from a dev machine.
+
+**Verified:** `caddy validate` against the actual Cloudflare-DNS-module
+build (`caddy/Dockerfile`, the same image pushed to Docker Hub's
+`caddy` service) confirms the updated Caddyfile still adapts and
+provisions correctly — validated with a realistically-shaped (if fake)
+Cloudflare token, same pattern as the original DNS-01 Caddyfile
+validation. Not yet re-verified against a real Android device post-fix
+(needs the user to redeploy and retest) — this entry should be updated
+once that's confirmed, or revisited if the problem persists.

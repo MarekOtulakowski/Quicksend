@@ -9,6 +9,19 @@
 	# LAN IP for local testing (see docs/DECISIONS.md). Harmless for a
 	# real public domain, where clients do send SNI.
 	default_sni {$QUICKSEND_DOMAIN}
+
+	# HTTP/3 is QUIC over UDP, which is far less reliable than TCP
+	# across mobile-carrier NATs and firewalls — packets get silently
+	# dropped mid-connection on some networks. Chrome on Android
+	# opportunistically upgrades to HTTP/3 (including for the
+	# WebSocket transport) much more aggressively than iOS Safari,
+	# which is why file transfers were only ever seen dying partway
+	# through from an Android sender — see docs/DECISIONS.md. This is a
+	# global "servers" option (not a per-site directive) because the
+	# listener itself is shared, even though there's only one site.
+	servers {
+		protocols h1 h2
+	}
 }
 
 {$QUICKSEND_DOMAIN} {
