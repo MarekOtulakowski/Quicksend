@@ -128,16 +128,30 @@ function renderSenderTransfer(container, socket, epochKey) {
   container.appendChild(list);
 
   let sending = false;
+  let detached = false;
 
   async function sendFiles(files) {
     // Matches input.disabled's existing effect of making the file
     // picker unopenable mid-send: a drop while already sending isn't
     // queued, just ignored, so batches don't interleave.
-    if (sending || files.length === 0) return;
+    if (sending || detached || files.length === 0) return;
     input.disabled = true;
     sending = true;
 
     for (const file of files) {
+      // A reconnect may have happened while the native file picker was
+      // open (see docs/DECISIONS.md: backgrounding this tab to browse
+      // another app — Google Photos in particular — can get it frozen
+      // by the browser, silently killing the WebSocket; reconnecting
+      // rebuilds this whole transfer UI around a fresh socket/epoch
+      // key and calls detach() on this one). This input and its
+      // change/drop listeners are still live JS objects even after
+      // being detached — a `change` event already in flight when the
+      // picker returns still fires on it — so without this check,
+      // files picked in that window would try to send over a socket
+      // pairing.js already knows is dead, instead of the live one a
+      // fresh render already set up.
+      if (detached) break;
       const row = createFileRow(list, file.name, file.size);
       row.statusEl.textContent = t("transferSending");
       const controller = new AbortController();
@@ -182,7 +196,12 @@ function renderSenderTransfer(container, socket, epochKey) {
     sendFiles(Array.from(e.dataTransfer.files || []));
   });
 
-  return { detach: () => {}, isActive: () => sending };
+  return {
+    detach: () => {
+      detached = true;
+    },
+    isActive: () => sending,
+  };
 }
 
 /** Picks a name that isn't already in usedNames, appending " (1)",

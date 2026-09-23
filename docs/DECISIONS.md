@@ -1510,3 +1510,84 @@ actually says — a specific close status, a read error with a message,
 a ping timeout, a relay write failure, or (if truly nothing logs)
 confirmation the failure is client-side only — replaces every
 remaining guess in this document with a fact.
+
+**Result:** `ws read error` with `"failed to get reader: failed to
+read frame header: EOF"` — a raw TCP EOF, not a WebSocket close
+handshake at all — for the *same session ID* twice, 12 seconds apart,
+role 1 (the sender) both times. No `ws ping timed out` line, so this
+wasn't the keepalive forcing the close; something killed the
+connection out from under it directly. The user also confirmed a
+screenshot picked *from inside Google Photos* (always local, never
+needs a cloud fetch) fails identically — ruling out "downloading a
+cloud-only original" as the cause. Whatever it is, it's tied to
+spending time inside the Google Photos app specifically, not file
+size or network fetches.
+
+## Found a real race: a stale file-input surviving a reconnect
+
+**What:** the leading theory became Chrome's Page Lifecycle "freezing"
+of backgrounded tabs (a documented feature that closes WebSockets to
+save resources) — plausible since selecting from Google Photos means
+backgrounding this tab for a system-picker Activity for however long
+the user takes to navigate/select, unlike an instant camera capture.
+Reasoning through what a freeze-triggered socket death actually does
+to `renderSenderTransfer` found a genuine, independently-real bug: its
+`<input type="file">` and `sendFiles` closure capture `socket` and
+`epochKey` once, at render time. A reconnect (`pairing.js`'s
+`attemptReconnect`) creates a *new* socket and re-renders the whole
+transfer UI around it — but the OS-level native file picker isn't tied
+to the page's render cycle at all. If the underlying connection dies
+*while that picker is open* (exactly what opening Google Photos does),
+the reconnect can complete and rebuild the UI *before* the user
+actually finishes picking a file — and the original, now-orphaned
+`<input>` is still a live JS object with its listeners intact; the
+`change` event the OS fires when the picker finally returns still runs
+on it, calling `sendFile` with the closure's stale, already-dead
+socket.
+
+**Why this hangs instead of erroring**: per the WebSocket spec,
+calling `.send()` on an already-CLOSED socket is a silent no-op, not
+an exception — so `sendFile`'s loop runs to completion "successfully"
+sending nothing, then waits forever on `while (!aborted && ackedUpTo <
+totalChunks - 1)` for an ack that can never arrive, since the dead
+socket's "close" event already fired in the past and won't fire again
+for a freshly-attached listener. Nothing throws, so none of today's
+earlier fixes (the `file_abort`-on-error catch, the keepalive, the
+`peer_disconnected` handler) intercept this at all — it's invisible
+by construction, on the sender's side specifically. **This is likely
+where the receiver's "waiting forever" comes from**: nothing was ever
+truly sent, so there's nothing for `peer_disconnected` or a timeout to
+react to.
+
+**Fix (`web/transfer-ui.js`):** `renderSenderTransfer`'s returned
+`detach` was a no-op (`() => {}`) — now it sets a `detached` flag that
+`sendFiles` checks before doing anything (and again per-file in its
+loop), so a change/drop event that fires after this render has been
+superseded does nothing instead of quietly hanging on a dead socket.
+`detachActiveTransfer()` (called at the top of every fresh
+`renderPaired`, including on reconnect) already invoked `detach()` —
+it just needed the sender side to actually implement it, matching what
+the receiver side already did for its own `attachReceiver` listener.
+
+**Honest caveat**: this fix makes the *symptom* disappear cleanly (a
+stale pick now silently does nothing instead of hanging), but its
+*visible* effect wouldn't be "back to the start screen" — the visible
+paired screen and its fresh, empty file input are completely
+unaffected throughout, since the hang happens on an invisible,
+detached DOM subtree. If what the user actually saw really was the
+start screen (two big Receive/Send buttons) rather than just an
+unresponsive picker, something else is also going on and this isn't
+the whole story. Needs the user to redeploy, reproduce again, and
+describe (or screenshot) exactly what's on screen right when it fails.
+
+**Verified** with a Playwright test using a monkey-patched
+`WebSocket` constructor (test-only instrumentation via
+`page.addInitScript`, no production code touched) to get a handle on
+the real socket pairing.js creates: pairs two pages, closes the live
+socket directly (triggering a genuine reconnect + re-render), captures
+the now-orphaned original `<input>`, and dispatches a `change` event
+on it with a synthetic file. Confirmed via `git stash`/`git stash pop`
+that this reproduces the bug on the pre-fix code (the stale input's
+`disabled` state gets stuck `true` forever — the hang) and is fixed
+afterward (`disabled` returns to `false` immediately, no hang), with
+the fresh input still working normally throughout.
