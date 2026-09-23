@@ -1698,3 +1698,45 @@ the file picked on the stale, orphaned input now actually arrives at
 the receiver (via the fresh UI's own file list, with the right name),
 and a second, independent send through the fresh input afterward still
 works normally.
+
+## The remaining gap wasn't an edge case — it was the common case
+
+**What:** the user reported the exact same failure after the fix
+above. The "remaining known gap" that entry flagged — the picker
+returning *before* any reconnect had completed — turned out to be
+the normal case, not a rare corner: Chrome's Page Lifecycle freezing
+of a backgrounded tab pauses *all* JS execution, not just the network
+connection. `attemptReconnect`'s `setTimeout`-based retry loop can't
+run a single tick while frozen, so it doesn't get a head start on
+reconnecting while the user is off in Google Photos — it only starts
+the instant the tab unfreezes, which happens at essentially the same
+moment the picker hands a file back. There's no realistic window
+where reconnecting finishes first.
+
+**Fix:** `handlePicked` (`web/transfer-ui.js`) now checks the socket's
+actual `readyState` in addition to `detached` — catching "already dead
+but nothing has reacted to it yet," not just "already superseded by a
+fresh render." `pairing.js`'s `onStaleFiles` callback also needed a
+real fix, not just a queue: an earlier version of this fix *only*
+queued and flushed on the next render, which broke the *other*
+scenario (a reconnect that finishes before the picker returns) since
+nothing triggers another render/flush after that point. It now checks
+readiness explicitly (`getPairedSession().socket.readyState ===
+WebSocket.OPEN`) before deciding: send immediately through
+`activeTransferHandle` if a live one already exists, otherwise queue
+in `pendingSendFiles` for the `.then()` flush once a working
+connection actually shows up. Checking readiness explicitly here —
+rather than always calling `activeTransferHandle.sendFiles` and
+letting it decide — also avoids a same-handle bounce loop: if the
+handle currently running this callback is still `activeTransferHandle`
+and still not ready, calling back into its own `sendFiles` would just
+re-enter this same callback synchronously.
+
+**Verified** with a second Playwright test alongside the existing one,
+matching the actual real-world timing: closes the socket and dispatches
+the picker's `change` event in the same synchronous turn (no `close`
+or `attemptReconnect` handler has had any chance to run yet), then lets
+real time pass for the reconnect to actually happen. The file still
+reaches the receiver once reconnected. The original test (reconnect
+completes first, pick happens after) still passes too — both timings
+now work, not just one.

@@ -172,20 +172,25 @@ function renderSenderTransfer(container, socket, epochKey, onStaleFiles) {
     input.disabled = false;
   }
 
-  // A reconnect may complete while the native file picker was open
-  // (backgrounding this tab to browse another app — Google Photos in
-  // particular — can get it frozen by the browser, silently killing
-  // the WebSocket; reconnecting rebuilds this whole transfer UI around
-  // a fresh socket/epoch key and calls detach() on this one). This
-  // input and its change/drop listeners are still live JS objects
-  // even after being detached — an event already in flight when the
-  // picker returns still fires on it. Rather than just dropping those
-  // files, hand them to onStaleFiles so pairing.js can forward them to
-  // whatever the *current* transfer UI actually is — the user picked
-  // a real file and shouldn't have to notice or retry just because a
-  // reconnect happened to land first. See docs/DECISIONS.md.
+  // The native file picker being open doesn't pause while this tab is
+  // backgrounded, but Chrome *does* fully freeze the tab itself while
+  // backgrounded for long enough (opening Google Photos on Android in
+  // particular) — which per the Page Lifecycle spec pauses ALL JS
+  // execution, not just network. That means the close event and
+  // pairing.js's attemptReconnect can't even start running until the
+  // tab unfreezes, which happens at essentially the same moment the
+  // picker returns control here — there's no head start for a
+  // reconnect to have already finished by then. So `detached` alone
+  // isn't enough (it only becomes true once a *fresh render* has
+  // already happened, which needs a completed reconnect); checking the
+  // socket's actual readyState catches the far more common case where
+  // it's already dead but nothing has reacted to that yet. Either way,
+  // hand the files to onStaleFiles instead of trying to send on a
+  // socket that can't carry them — the user picked a real file and
+  // shouldn't have to notice or retry just because of this timing.
+  // See docs/DECISIONS.md.
   function handlePicked(files) {
-    if (detached) {
+    if (detached || socket.readyState !== WebSocket.OPEN) {
       onStaleFiles && onStaleFiles(files);
       return;
     }

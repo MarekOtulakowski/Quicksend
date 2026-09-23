@@ -87,6 +87,16 @@ let activeStopScan = null;
 let activeTransferHandle = null;
 let swapAwaitingResponse = false;
 
+// Files picked while the sender's connection wasn't actually usable
+// yet (see transfer-ui.js's handlePicked and docs/DECISIONS.md) — kept
+// here, not just re-tried immediately, since the moment they were
+// picked there may not be any live connection at all yet for anything
+// to forward them to. Flushed the next time renderPaired sets up a
+// transfer UI with a working socket. Last-write-wins is fine: a user
+// picking again before ever getting a working connection is rare
+// enough not to warrant a real queue.
+let pendingSendFiles = null;
+
 function buildPairingURL(sessionId, sessionKey) {
   const url = new URL(location.href);
   url.hash = `s=${sessionId}&k=${b64url.encode(sessionKey)}`;
@@ -126,6 +136,9 @@ function cleanupActive() {
     activeSocket = null;
   }
   detachActiveTransfer();
+  // A pick queued for this session (see renderPaired) has nowhere
+  // sensible to go once we've navigated away from it entirely.
+  pendingSendFiles = null;
 }
 
 /** Detaches the current transfer UI's socket listener, if any. Must
@@ -689,20 +702,37 @@ function renderPaired(container) {
   const transferRoot = document.createElement("div");
   container.appendChild(transferRoot);
   renderTransferUI(transferRoot, getPairedSession(), (files) => {
-    // A file picked on a now-superseded sender UI (see
-    // transfer-ui.js's handlePicked/detach) — forward it to whatever
-    // the *current* transfer UI is, so the pick still goes through
-    // instead of silently vanishing. activeTransferHandle is read
-    // fresh here (not closed over at setup time), so this always
-    // targets whichever render is actually live when the stale event
-    // fires. If the current handle isn't a sender anymore (a role
-    // swap happened, or the session ended), there's nothing sensible
-    // to forward to — the pick is dropped, same as before this existed.
-    if (activeTransferHandle && activeTransferHandle.sendFiles) {
+    // The socket wasn't usable at the moment these were picked (see
+    // transfer-ui.js's handlePicked) — most likely because this tab
+    // was frozen by the browser for backgrounding into another app
+    // (Google Photos in particular) for long enough that even
+    // attemptReconnect's own retry loop couldn't start running until
+    // just now. See docs/DECISIONS.md.
+    //
+    // A *different*, already-reconnected handle may already exist by
+    // now, though (reconnect can finish before a slow picker
+    // interaction returns) — check readiness explicitly and use it
+    // right away in that case, rather than only ever queuing: nothing
+    // else would trigger a flush of the queue if a fresh render
+    // already happened before this fired. Checking readiness here
+    // (instead of just calling activeTransferHandle.sendFiles and
+    // letting *it* decide) also avoids a same-handle bounce loop —
+    // sendFiles would otherwise call straight back into this same
+    // callback if activeTransferHandle turns out to still be the
+    // not-yet-superseded, not-ready handle currently running it.
+    const live = getPairedSession();
+    if (activeTransferHandle && activeTransferHandle.sendFiles && live && live.socket && live.socket.readyState === WebSocket.OPEN) {
       activeTransferHandle.sendFiles(files);
+    } else {
+      pendingSendFiles = files;
     }
   }).then((handle) => {
     activeTransferHandle = handle;
+    if (pendingSendFiles && handle.sendFiles) {
+      const files = pendingSendFiles;
+      pendingSendFiles = null;
+      handle.sendFiles(files);
+    }
   });
 }
 
