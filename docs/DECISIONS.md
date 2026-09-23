@@ -1261,7 +1261,7 @@ and self-evidently clickable right below "Swap roles".
 **Status: the fix was correct but never reached the user's browser.**
 The user still couldn't see the repositioned button after redeploying.
 Checking the live site directly (`curl -sI
-https://qs.makoff.ovh/pairing.js`/`styles.css`) found the real cause:
+https://<the-deployed-domain>/pairing.js`/`styles.css`) found the real cause:
 `Cache-Control: max-age=14400` (4 hours) with `cf-cache-status: HIT` —
 the domain's Cloudflare DNS record is proxied (orange cloud; see the
 HTTP/3 entry above), and Cloudflare applies its own default 4-hour
@@ -1347,7 +1347,7 @@ continued below with two real, independent fixes.
 
 **What:** after redeploying, neither the user nor a direct `curl`
 could see any code change take effect — the live site kept serving
-JS/CSS from *before* the deploy. `curl -sI https://qs.makoff.ovh/pairing.js`
+JS/CSS from *before* the deploy. `curl -sI https://<the-deployed-domain>/pairing.js`
 showed `cache-control: max-age=14400` (4h) and `cf-cache-status: HIT`.
 `http.FileServer` (`server/cmd/quicksend/main.go`) sends no
 `Cache-Control` header at all, so this was entirely Cloudflare's own
@@ -1385,7 +1385,7 @@ Cloudflare's own authoritative nameservers answer correctly right
 away. Querying `1.1.1.1` even shortly after the toggle still returned
 stale (proxied) answers, which looked exactly like "the change didn't
 take" until querying the zone's authoritative nameservers directly
-(`dig qs.makoff.ovh @kelly.ns.cloudflare.com`) and connecting straight
+(`dig <the-deployed-domain> @kelly.ns.cloudflare.com`) and connecting straight
 to the real origin IP with `curl --resolve` (bypassing DNS entirely)
 both confirmed the change *had* taken effect at the source — it just
 hadn't reached every resolver yet. Worth remembering next time a DNS
