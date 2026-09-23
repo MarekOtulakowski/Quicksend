@@ -45,7 +45,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.Handle("GET /ws", ws.NewHandler(hub))
-	mux.Handle("/", http.FileServer(http.FS(webRoot)))
+	mux.Handle("/", noCache(http.FileServer(http.FS(webRoot))))
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -79,4 +79,21 @@ func main() {
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// noCache forces every static asset request to revalidate with the
+// origin instead of being cached for hours by the browser or an
+// intermediate CDN. http.FileServer sets no Cache-Control header of
+// its own — a proxied Cloudflare zone in front of this app was filling
+// that gap with its own default (max-age=14400, 4 hours), silently
+// serving a stale pairing.js/styles.css to every visitor for hours
+// after each deploy (see docs/DECISIONS.md). "no-cache" still allows
+// caching, it just requires a conditional request each time — which
+// http.FileServer already answers with a cheap 304 via its automatic
+// ETag/Last-Modified handling when nothing changed.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
 }

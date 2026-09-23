@@ -1257,3 +1257,81 @@ of view) and restyled it as an ordinary bordered button tinted with
 the danger color, instead of the flat link style — confirmed visually
 via a fresh screenshot that it's now immediately visible, unmissable,
 and self-evidently clickable right below "Swap roles".
+
+**Status: the fix was correct but never reached the user's browser.**
+The user still couldn't see the repositioned button after redeploying.
+Checking the live site directly (`curl -sI
+https://qs.makoff.ovh/pairing.js`/`styles.css`) found the real cause:
+`Cache-Control: max-age=14400` (4 hours) with `cf-cache-status: HIT` —
+the domain's Cloudflare DNS record is proxied (orange cloud; see the
+HTTP/3 entry above), and Cloudflare applies its own default 4-hour
+edge+browser cache to static file extensions like `.js`/`.css` when
+the origin sends no `Cache-Control` header of its own, which
+`http.FileServer` never does. Every redeploy updated the origin
+correctly, but both Cloudflare's edge cache *and* the user's own
+browser kept serving whichever copy they'd already cached, for up to 4
+hours, regardless of how many times the origin changed underneath it.
+
+**Fix:** wrapped the static file handler in `server/cmd/quicksend/main.go`
+with a small `noCache` middleware that sets `Cache-Control: no-cache`
+on every response. This doesn't disable caching outright — it forces a
+conditional revalidation (If-None-Match/If-Modified-Since) on every
+request, which `http.FileServer`'s built-in ETag/Last-Modified support
+already answers with a cheap 304 when nothing changed — so a real
+change is picked up on the very next load instead of silently waiting
+out an arbitrary CDN's default TTL. Verified locally: `curl -sI
+http://localhost:8080/pairing.js` now shows `Cache-Control: no-cache`.
+
+**This only prevents the problem going forward** — it doesn't retroactively
+clear whatever Cloudflare's edge already cached from before this fix
+shipped. The user needs to purge Cloudflare's cache once after
+deploying it (dashboard → Caching → Configuration → Purge Everything,
+or purge the specific JS/CSS URLs) for the fix itself to take effect
+immediately rather than waiting out the existing 4-hour TTL. Given
+this is now the second unrelated bug traced back to the proxy being on
+for a domain that only ever needed Cloudflare for its DNS API (DNS-01
+cert issuance is unaffected by proxy status — it only ever talks to
+Cloudflare's API, never the proxied traffic path), switching the
+record to "DNS only" (grey cloud) was suggested to the user as the
+more direct fix, with this code change kept regardless as defense in
+depth for anyone self-hosting behind any CDN.
+
+## sendFile now tells the receiver when a local file read fails
+
+**What:** found while investigating a real-device Android report: a
+photo picked from Google Photos (as opposed to one just taken with the
+camera) would start sending, then silently die, and — critically — the
+*receiving* PC side just stayed on "Waiting for files…" forever with no
+error at all. Reading `sendFile`'s loop in `web/transfer.js` found why:
+`file.slice(start, end).arrayBuffer()` throwing (which a cloud-backed
+photo needing an on-demand download is a very plausible way to
+trigger — Google Photos, iCloud, and similar providers can back a
+`File` with content that isn't actually resident on the device yet)
+propagated straight out of the function without ever notifying the
+receiver via `file_abort`; that message was only ever sent from the
+two paths that already know they're aborting (a local
+`AbortController` cancel, or the peer's own `file_abort`). Any *other*
+exception — a file read failure, an encryption error, anything — left
+the receiver's `attachReceiver` waiting on a chunk that would never
+come, indefinitely, with no visible sign anything had gone wrong.
+
+**Fix:** added a `catch` in `sendFile` that sends `file_abort` for any
+error that isn't already one of the two self-notifying paths (an
+explicit `AbortError`, or the socket already confirmed gone via
+`connectionLost`), then rethrows so the sender's own UI still shows
+its usual error state. The receiver now always hears about a dead
+transfer instead of only sometimes.
+
+**Verified** with a new unit test
+(`web/transfer.test.mjs`: "sendFile notifies the receiver via
+file_abort when reading the file itself throws") using a fake `File`-
+like object whose `.slice().arrayBuffer()` rejects — not reproducible
+with a real `File` in a test environment — confirming both that
+`sendFile` still rejects with the original error (so the sender's own
+error UI is unaffected) and that a `file_abort` frame is now sent.
+Not yet confirmed against the actual Google Photos scenario on a real
+Android device (needs the user to redeploy and retest) — if reading
+really is what's failing there, the receiver should now show the
+"Canceled" state instead of hanging; if it still hangs, the failure
+must be happening somewhere else entirely (e.g. the whole session
+actually dying, not just this one file), which would need revisiting.

@@ -93,6 +93,32 @@ test("sendFile resolves normally when every chunk is acked (control case)", asyn
   assert.equal(chunkFrames.length, 1, "expected exactly one chunk frame for a file smaller than CHUNK_SIZE");
 });
 
+test("sendFile notifies the receiver via file_abort when reading the file itself throws", async () => {
+  const socket = new FakeSocket();
+  const sessionKey = crypto.getRandomValues(new Uint8Array(32));
+  const epochKey = await deriveEpochKey(sessionKey, 0);
+
+  // Stands in for a file backed by a cloud provider (e.g. a Google
+  // Photos item on Android that needs an on-demand download) whose
+  // read can fail partway through — a real File object can't easily
+  // be made to throw from .slice().arrayBuffer() in a test. Without
+  // the fix this guards, this failure left the receiver waiting for a
+  // chunk that would never arrive, with no indication anything failed.
+  const fakeFile = {
+    name: "cloud-photo.jpg",
+    type: "image/jpeg",
+    size: 10,
+    slice() {
+      return { arrayBuffer: () => Promise.reject(new Error("simulated read failure")) };
+    },
+  };
+
+  await assert.rejects(sendFile(socket, epochKey, fakeFile, {}), /simulated read failure/);
+
+  const abortMsg = socket.sent.find((d) => typeof d === "string" && JSON.parse(d).type === "file_abort");
+  assert.ok(abortMsg, "expected sendFile to notify the receiver via file_abort instead of leaving it hanging");
+});
+
 test("attachReceiver reports an error instead of hanging when the socket closes mid-file", async () => {
   const socket = new FakeSocket();
   const sessionKey = crypto.getRandomValues(new Uint8Array(32));

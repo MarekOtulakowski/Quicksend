@@ -136,6 +136,24 @@ export async function sendFile(socket, epochKey, file, { onProgress, signal } = 
       if (aborted.reason) err.reason = aborted.reason;
       throw err;
     }
+  } catch (err) {
+    // Any failure that isn't already one of the two paths above that
+    // notify the receiver themselves (an explicit abort, or the
+    // socket already being gone) must still tell it to give up —
+    // otherwise it's left waiting for a chunk that's never coming,
+    // with no visible error, forever. This covers e.g. a local file
+    // read failing partway through (a cloud-backed photo — Google
+    // Photos, iCloud — that needs an on-demand download and times out
+    // or errors instead of returning bytes) or encryption throwing.
+    const isAbort = err instanceof DOMException && err.name === "AbortError";
+    if (!isAbort && !connectionLost) {
+      try {
+        sendEnvelope(socket, "file_abort", { fileId: fileIdHex });
+      } catch {
+        // Socket already unusable; nothing to notify.
+      }
+    }
+    throw err;
   } finally {
     socket.removeEventListener("message", onMessage);
     socket.removeEventListener("close", onClose);
