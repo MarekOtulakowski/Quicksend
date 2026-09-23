@@ -4,6 +4,8 @@ Self-hosted, end-to-end encrypted file transfer between a phone and any
 browser, even when the two devices are on different networks. No native
 app, no account, no files ever touched by the server.
 
+https://github.com/user-attachments/assets/591f6405-199c-4088-94c4-4bffedfa224c
+
 ## What it is
 
 Quicksend pairs two browsers — the same PWA plays either role — through
