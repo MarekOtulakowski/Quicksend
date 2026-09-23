@@ -19,11 +19,14 @@ import { deriveReconnectToken } from "./crypto.js";
 // socket drops unexpectedly, and how long to wait between attempts,
 // before giving up and showing the "connection lost" error screen.
 // The relay itself keeps a session resumable for
-// QUICKSEND_RECONNECT_GRACE_PERIOD (default 45s); this budget is
-// comfortably inside that window without the client needing to know
-// the exact server-side value.
-const RECONNECT_MAX_ATTEMPTS = 6;
-const RECONNECT_RETRY_DELAY_MS = 2000;
+// QUICKSEND_RECONNECT_GRACE_PERIOD (default 45s) — these add up to
+// about the same total window, so the client keeps trying for
+// roughly as long as the relay is actually still willing to accept a
+// reconnect, instead of giving up early on a mobile connection that's
+// still mid-handover (a real-world Android failure this used to be
+// too short for — see docs/DECISIONS.md).
+const RECONNECT_MAX_ATTEMPTS = 15;
+const RECONNECT_RETRY_DELAY_MS = 3000;
 
 const SESSION_KEY_BYTES = 32;
 
@@ -682,6 +685,31 @@ function renderPaired(container) {
   renderTransferUI(transferRoot, getPairedSession()).then((handle) => {
     activeTransferHandle = handle;
   });
+
+  container.appendChild(button(t("disconnectButton"), () => disconnectSession(container), "danger-button"));
+}
+
+/** Manually ends the session on request — the escape hatch for when a
+ * user just wants out: stuck mid-reconnect (see attemptReconnect's
+ * retry loop above), or simply done and not waiting for the other
+ * side to notice. Tells the relay via `end_session` so the other peer
+ * gets a clean `session_ended` (reason `ended_by_peer`) instead of
+ * just seeing this side vanish — but only if there's actually a live
+ * socket to send it on; mid-reconnect there isn't one yet (activeSocket
+ * is nulled out as soon as the previous one drops — see
+ * wirePairedSocket), and setState below still correctly abandons any
+ * in-flight reconnect attempt either way, since attemptReconnect's own
+ * closures bail out once currentState.screen is no longer "paired". */
+function disconnectSession(container) {
+  if (activeSocket) {
+    try {
+      sendEnvelope(activeSocket, "end_session", null);
+    } catch {
+      // Socket already unusable; nothing to notify — falls through to
+      // the local cleanup below regardless.
+    }
+  }
+  setState(container, { screen: "role-select" });
 }
 
 /** Flips this client's transferRole (sender<->receiver) and
@@ -752,7 +780,12 @@ function wirePairedSocket(container, socket) {
     const env = parseEnvelope(event);
     if (!env) return;
     if (env.type === "session_ended") {
-      setState(container, { screen: "error", code: "session_ended" });
+      // The specific reason (ended_by_peer / peer_timeout /
+      // inactivity_timeout — see docs/PROTOCOL.md) drives which
+      // message is shown; using the literal message type here instead
+      // would always show the same generic text regardless of why the
+      // session actually ended.
+      setState(container, { screen: "error", code: (env.payload && env.payload.reason) || "session_ended" });
     } else if (env.type === "peer_reconnected") {
       currentState = { ...currentState, epoch: currentState.epoch + 1 };
       render(container);
@@ -842,6 +875,9 @@ const ERROR_MESSAGE_KEYS = {
   code_mismatch: "errCodeMismatch",
   connection_lost: "errConnectionLost",
   session_ended: "errSessionEnded",
+  ended_by_peer: "errEndedByPeer",
+  peer_timeout: "errSessionEnded",
+  inactivity_timeout: "errInactivityTimeout",
   invalid_reconnect_token: "errConnectionLost",
 };
 

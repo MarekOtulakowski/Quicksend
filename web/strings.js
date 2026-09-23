@@ -57,6 +57,8 @@ export const STRINGS = {
     errCodeMismatch: "Kod się nie zgadza po obu stronach. Spróbujcie ponownie z nowym kodem.",
     errConnectionLost: "Utracono połączenie i nie udało się go wznowić.",
     errSessionEnded: "Sesja zakończona — drugie urządzenie nie wróciło na czas.",
+    errEndedByPeer: "Druga strona zakończyła sesję.",
+    errInactivityTimeout: "Sesja zakończona z powodu braku aktywności.",
     errGeneric: "Coś poszło nie tak. Spróbuj ponownie.",
     tryAgain: "Spróbuj ponownie",
     insecureContextTitle: "Brak bezpiecznego połączenia",
@@ -68,6 +70,7 @@ export const STRINGS = {
     swapRejected: "Druga strona odrzuciła zamianę (trwa transfer). Spróbuj ponownie za chwilę.",
     swapBusyLocal: "Zaczekaj, aż bieżący transfer się zakończy.",
     swapTimedOut: "Brak odpowiedzi. Spróbuj ponownie.",
+    disconnectButton: "Rozłącz",
 
     transferSenderHint: "Wybierz pliki do wysłania",
     dropHint: "albo przeciągnij i upuść pliki tutaj",
@@ -145,6 +148,8 @@ export const STRINGS = {
     errCodeMismatch: "The code didn't match on both sides. Try again with a new code.",
     errConnectionLost: "Connection lost and couldn't be resumed.",
     errSessionEnded: "Session ended — the other device didn't come back in time.",
+    errEndedByPeer: "The other device ended the session.",
+    errInactivityTimeout: "Session ended due to inactivity.",
     errGeneric: "Something went wrong. Please try again.",
     tryAgain: "Try again",
     insecureContextTitle: "No secure connection",
@@ -156,6 +161,7 @@ export const STRINGS = {
     swapRejected: "The other side declined (a transfer is in progress). Try again shortly.",
     swapBusyLocal: "Wait for the current transfer to finish first.",
     swapTimedOut: "No response. Try again.",
+    disconnectButton: "Disconnect",
 
     transferSenderHint: "Choose files to send",
     dropHint: "or drag and drop files here",

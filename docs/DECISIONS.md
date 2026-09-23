@@ -1160,3 +1160,84 @@ Cloudflare token, same pattern as the original DNS-01 Caddyfile
 validation. Not yet re-verified against a real Android device post-fix
 (needs the user to redeploy and retest) — this entry should be updated
 once that's confirmed, or revisited if the problem persists.
+
+**Status: did not fix it.** Redeployed and retested for real — Caddy's
+`srv0` server confirmed `"protocols":["h1","h2"]` (h3 genuinely off),
+and the Android sender still died mid-transfer, with the client
+showing "Utracono połączenie i nie udało się go wznowić"
+(`errConnectionLost`) — i.e. the paired WebSocket itself dropped *and*
+the client's own reconnect attempt subsequently failed too. HTTP/3
+wasn't the (sole) cause. Investigation continues below.
+
+## Reconnect retry budget was too short for a real mobile network gap
+
+**What:** while chasing the Android mid-transfer disconnects above, an
+Explore pass over `server/internal/ws` and `server/internal/session`
+found the relay has **no ping/pong keepalive at all** (confirmed via
+`grep` across both packages — zero matches for
+`Ping`/`Pong`/`SetReadDeadline`/`SetPongHandler`), and almost no
+logging (`server/internal/ws/handler.go`'s main read loop discards the
+actual read error entirely before tearing the connection down — see
+handler.go's relay loop). So a stalled/dropped mobile connection is
+invisible server-side until either side's next write fails, and there
+was nothing to log to prove which failure mode was happening.
+
+Separately, re-reading `pairing.js`'s `attemptReconnect` found a real,
+independently-fixable bug: the client retried reconnecting only 6
+times, 2 seconds apart — a 12-second total budget — while the relay
+itself (`QUICKSEND_RECONNECT_GRACE_PERIOD`, default 45s) stays willing
+to accept a reconnect for far longer. A mobile network gap (a cell
+tower handover, a brief signal loss) lasting anywhere from 12 to 45
+seconds — very plausible on a phone, rare on a stable WiFi/iPhone
+connection — would make the client give up and show an unrecoverable
+"connection lost" error even though the relay was still waiting.
+
+**Fix:** changed `RECONNECT_MAX_ATTEMPTS` from 6 to 15 and
+`RECONNECT_RETRY_DELAY_MS` from 2000 to 3000 (`web/pairing.js`) — 45
+seconds total, matching the relay's own grace period, so the client
+keeps trying for as long as the relay would actually still accept it
+instead of quitting early on a connection that's still mid-recovery.
+
+**Not yet confirmed as the (sole) fix for the Android symptom** — this
+needs the user to redeploy and retest again. If it still fails, the
+next step is adding the logging the Explore pass identified as missing
+(the discarded read error in `handler.go`'s relay loop, and the
+silently-discarded write-timeout error in `hub.go`'s relay path) so a
+future reproduction actually produces diagnosable server-side evidence
+instead of another guess.
+
+## Manual "Disconnect" button on the paired screen
+
+**What:** requested directly by the user while debugging the Android
+issue above — there was no way to voluntarily leave a paired session;
+the only exits were an error screen's "Try again" (only reachable
+*after* something already broke) or closing the tab outright (which
+just looks like a network drop to the other side, triggering their own
+`peer_timeout` wait). Added a small `.danger-button`-styled
+"Disconnect" button to `renderPaired`, which sends the relay's already-
+existing (but previously unused by this client) `end_session` message
+and locally resets to the start screen via the existing `setState`
+teardown path. Deliberately placed in `renderPaired` itself (not just
+the transfer sub-view) so it stays visible even while stuck in a
+"reconnecting…" state — `attemptReconnect`'s retry chain already checks
+`currentState.screen !== "paired"` before each attempt, so clicking
+Disconnect during a stuck reconnect cleanly abandons it rather than
+needing separate cancellation logic.
+
+**Bug found and fixed along the way:** `wirePairedSocket`'s
+`session_ended` handler was discarding the message's actual `reason`
+field entirely and hardcoding `code: "session_ended"`, so every
+session-ended error — regardless of whether it was the other peer
+explicitly disconnecting (`ended_by_peer`), a reconnect grace period
+expiring (`peer_timeout`), or the whole session going idle
+(`inactivity_timeout`) — showed the same generic (and for the other
+two reasons, actively wrong) message: "the other device didn't come
+back in time". Now the real `payload.reason` drives which string is
+shown; added the two previously-missing string keys (`errEndedByPeer`,
+`errInactivityTimeout`) to `strings.js` in both locales.
+
+**Verified end-to-end with Playwright**: paired two real pages,
+clicked the new Disconnect button on one side, confirmed it returns to
+the start screen locally and that the other side lands on the error
+screen with the correct "The other device ended the session." text
+(not the old generic "didn't come back in time" message).

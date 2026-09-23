@@ -143,6 +143,8 @@ more).
   re-pairing (refused while a transfer is actively in progress)
 - Cancelling a single in-progress transfer, from either side, without
   ending the session
+- Manually disconnecting the whole session on demand, from either
+  side, instead of only ever exiting via an error
 - Sharing the pairing link/code via the native share sheet or
   clipboard, with a persistent warning that whoever has it can join
   the transfer
