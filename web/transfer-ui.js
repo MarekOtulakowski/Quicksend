@@ -80,26 +80,30 @@ function createFileRow(list, name, size) {
  *   - isActive() reports whether a send/receive is currently in
  *     progress, so pairing.js can refuse a role swap mid-transfer
  *     instead of corrupting it.
+ *
+ * onStaleFiles(files), if given, is called instead of sending
+ * whenever this exact render has already been superseded by a fresh
+ * one (see renderSenderTransfer's `detached` handling) — letting the
+ * caller (pairing.js) hand the files off to whatever the *current*
+ * transfer UI is, rather than just dropping them.
  */
-export async function renderTransferUI(container, session) {
+export async function renderTransferUI(container, session, onStaleFiles) {
   container.innerHTML = "";
   container.className = "transfer";
 
   // epoch advances by one on every successful reconnect (either side),
   // so files sent after a reconnect are encrypted under a fresh key —
   // see cryptoutil.DeriveEpochKey / docs/DECISIONS.md. Re-deriving it
-  // here means a reconnect must re-render this UI (see pairing.js),
-  // which also means an in-flight transfer at the time of the drop is
-  // not resumed; the user resends the file.
+  // here means a reconnect must re-render this UI (see pairing.js).
   const epochKey = await deriveEpochKey(session.sessionKey, session.epoch || 0);
 
   if (session.transferRole === "receiver") {
     return renderReceiverTransfer(container, session.socket, epochKey);
   }
-  return renderSenderTransfer(container, session.socket, epochKey);
+  return renderSenderTransfer(container, session.socket, epochKey, onStaleFiles);
 }
 
-function renderSenderTransfer(container, socket, epochKey) {
+function renderSenderTransfer(container, socket, epochKey, onStaleFiles) {
   const hint = document.createElement("p");
   hint.textContent = t("transferSenderHint");
   container.appendChild(hint);
@@ -139,18 +143,10 @@ function renderSenderTransfer(container, socket, epochKey) {
     sending = true;
 
     for (const file of files) {
-      // A reconnect may have happened while the native file picker was
-      // open (see docs/DECISIONS.md: backgrounding this tab to browse
-      // another app — Google Photos in particular — can get it frozen
-      // by the browser, silently killing the WebSocket; reconnecting
-      // rebuilds this whole transfer UI around a fresh socket/epoch
-      // key and calls detach() on this one). This input and its
-      // change/drop listeners are still live JS objects even after
-      // being detached — a `change` event already in flight when the
-      // picker returns still fires on it — so without this check,
-      // files picked in that window would try to send over a socket
-      // pairing.js already knows is dead, instead of the live one a
-      // fresh render already set up.
+      // Guards the (rare) case where detach() runs mid-batch, between
+      // two files of a multi-file send — see the change/drop handlers
+      // below for the far more common case (a reconnect completing
+      // *before* this is even called).
       if (detached) break;
       const row = createFileRow(list, file.name, file.size);
       row.statusEl.textContent = t("transferSending");
@@ -176,10 +172,30 @@ function renderSenderTransfer(container, socket, epochKey) {
     input.disabled = false;
   }
 
+  // A reconnect may complete while the native file picker was open
+  // (backgrounding this tab to browse another app — Google Photos in
+  // particular — can get it frozen by the browser, silently killing
+  // the WebSocket; reconnecting rebuilds this whole transfer UI around
+  // a fresh socket/epoch key and calls detach() on this one). This
+  // input and its change/drop listeners are still live JS objects
+  // even after being detached — an event already in flight when the
+  // picker returns still fires on it. Rather than just dropping those
+  // files, hand them to onStaleFiles so pairing.js can forward them to
+  // whatever the *current* transfer UI actually is — the user picked
+  // a real file and shouldn't have to notice or retry just because a
+  // reconnect happened to land first. See docs/DECISIONS.md.
+  function handlePicked(files) {
+    if (detached) {
+      onStaleFiles && onStaleFiles(files);
+      return;
+    }
+    sendFiles(files);
+  }
+
   input.addEventListener("change", () => {
     const files = Array.from(input.files || []);
     input.value = "";
-    sendFiles(files);
+    handlePicked(files);
   });
 
   ["dragenter", "dragover"].forEach((evt) =>
@@ -193,7 +209,7 @@ function renderSenderTransfer(container, socket, epochKey) {
   );
   dropZone.addEventListener("drop", (e) => {
     e.preventDefault();
-    sendFiles(Array.from(e.dataTransfer.files || []));
+    handlePicked(Array.from(e.dataTransfer.files || []));
   });
 
   return {
@@ -201,6 +217,7 @@ function renderSenderTransfer(container, socket, epochKey) {
       detached = true;
     },
     isActive: () => sending,
+    sendFiles,
   };
 }
 

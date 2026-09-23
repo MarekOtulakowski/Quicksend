@@ -688,7 +688,20 @@ function renderPaired(container) {
 
   const transferRoot = document.createElement("div");
   container.appendChild(transferRoot);
-  renderTransferUI(transferRoot, getPairedSession()).then((handle) => {
+  renderTransferUI(transferRoot, getPairedSession(), (files) => {
+    // A file picked on a now-superseded sender UI (see
+    // transfer-ui.js's handlePicked/detach) — forward it to whatever
+    // the *current* transfer UI is, so the pick still goes through
+    // instead of silently vanishing. activeTransferHandle is read
+    // fresh here (not closed over at setup time), so this always
+    // targets whichever render is actually live when the stale event
+    // fires. If the current handle isn't a sender anymore (a role
+    // swap happened, or the session ended), there's nothing sensible
+    // to forward to — the pick is dropped, same as before this existed.
+    if (activeTransferHandle && activeTransferHandle.sendFiles) {
+      activeTransferHandle.sendFiles(files);
+    }
+  }).then((handle) => {
     activeTransferHandle = handle;
   });
 }

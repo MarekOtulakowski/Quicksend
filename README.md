@@ -207,14 +207,13 @@ situation.
   files. See the size warning shown in the UI when this fallback is
   used.
 - **Picking a file from the Google Photos app on Android** can
-  disconnect the sender: opening it backgrounds the browser tab for
-  long enough that Android/Chrome's own resource management can close
-  the WebSocket outright — a platform limitation, not something an app
-  in the page can prevent (see docs/DECISIONS.md). The app recovers
-  gracefully (reconnects, or shows a clear error) rather than hanging,
-  but the send itself needs retrying. Picking from the device's local
-  gallery instead avoids this entirely; for a Google-Photos-only file,
-  download it to the device first.
+  disconnect the sender while the picker is open: backgrounding the
+  browser tab for long enough lets Android/Chrome's own resource
+  management close the WebSocket outright — a platform limitation, not
+  something an app in the page can prevent (see docs/DECISIONS.md).
+  The app reconnects and still sends the picked file automatically in
+  the common case; if the picker returns before the reconnect finishes,
+  the send can still fail and need retrying.
 - See "Not yet implemented" above for missing features.
 
 ## Development

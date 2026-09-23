@@ -1644,3 +1644,57 @@ constraint rather than an open bug. If a *different* Android disconnect
 pattern shows up later (a different error, not tied to switching to a
 heavy foreground app), it should get its own fresh investigation
 rather than being folded into this one.
+
+## Reopened: forwarding a "stale" pick instead of just surviving it
+
+**What:** the previous entry accepted "pick from the local gallery
+instead" as the practical answer, on the reasoning that the
+disconnect itself can't be prevented from inside the page. The user
+pushed back — correctly — that this meaningfully limits the app for
+anyone whose photos live in Google Photos, which is most people. The
+disconnect genuinely can't be prevented, but *losing the file the user
+already picked* turned out to be a separate, fixable problem: the
+previous fix (`detached` flag) only stopped the stale input's `change`
+event from hanging on a dead socket — it didn't do anything useful
+with the files the user had actually just picked, so they were
+silently thrown away, and the user still had to notice nothing
+happened and go back into Google Photos again (repeating the same
+risk).
+
+**Fix:** instead of discarding a pick on a superseded (detached)
+sender UI, forward it to whatever the *current* transfer UI actually
+is. `renderTransferUI`/`renderSenderTransfer` (`web/transfer-ui.js`)
+now accept an `onStaleFiles(files)` callback, invoked instead of
+sending whenever `handlePicked` notices this render has already been
+detached; `renderPaired` (`web/pairing.js`) supplies one that looks up
+`activeTransferHandle` *at call time* (not closed over at setup —
+it's whatever's current when the stale event actually fires) and
+calls its `sendFiles` — now exposed on the returned handle
+specifically for this. This is correct by construction: the fresh
+handle already has the right (post-reconnect) socket and epoch key,
+and appending the row to *its* visible file list gives the user actual
+progress feedback instead of nothing.
+
+If the current handle isn't a sender anymore (a role swap happened, or
+the session ended entirely), there's nothing sensible to forward to —
+the pick is silently dropped, same as before this existed.
+
+**Remaining known gap:** this only helps once a reconnect has already
+completed by the time the stale event fires (i.e. `detached` is
+already `true`) — which real-world timing suggests is the common case,
+since the client starts reconnecting the instant it notices the drop,
+typically well before a human finishes navigating a photo app. If the
+picker returns *before* any reconnect has completed at all, `sendFiles`
+is still called directly against the not-yet-detached, already-dead
+socket and will hang the same way as before — `sendFile` attaches its
+own "close" listener at call time, which can never fire for a closure
+event that already happened in the past. Not fixed here; would need
+`sendFile` itself to check the socket's `readyState` before starting
+rather than relying only on future close events.
+
+**Verified**: updated the Playwright test from the previous entry to
+assert the *positive* outcome instead of just "nothing bad happens" —
+the file picked on the stale, orphaned input now actually arrives at
+the receiver (via the fresh UI's own file list, with the right name),
+and a second, independent send through the fresh input afterward still
+works normally.
